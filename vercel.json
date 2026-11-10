@@ -1,0 +1,14 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "site",
+  "cleanUrls": true,
+  "headers": [{ "source": "/(.*)", "headers": [{ "key": "X-Robots-Tag", "value": "noindex, nofollow" }] }],
+  "rewrites": [
+    { "source": "/movies", "destination": "/index.html" },
+    { "source": "/movie/:path*", "destination": "/index.html" },
+    { "source": "/theatres", "destination": "/index.html" },
+    { "source": "/theatre/:path*", "destination": "/index.html" },
+    { "source": "/history", "destination": "/index.html" },
+    { "source": "/rules", "destination": "/index.html" }
+  ]
+}

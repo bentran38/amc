@@ -1,0 +1,12 @@
+{
+  "name": "durpeesquid-amc",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/gen-config.js",
+    "dev": "node scripts/gen-config.js && npx --yes serve site -l 8003 -s",
+    "dev:mock": "node dev/serve.js",
+    "test": "cd test && npm install --no-audit --no-fund && node --test"
+  }
+}
