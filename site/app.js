@@ -1,9 +1,10 @@
 // AMC A-List planner: pages and routing. Data access is in api.js, the A-List rules in rules.js, drag and drop in
 // drag.js.
-//   /                    the plan: everyone's admissions, each A-List week as a Fri–Thu strip, a rail of movies
+//   /                    the plan: a calendar (?view=day|week|month|year&date=) beside a catalog of movies to drag
+//                        onto days; everyone's A-List admissions on top
 //   /movies              what's on, for all stored days or one A-List week (?week=<friday>)
 //   /movie/<id>          one movie's showtimes, day by day (?week=<friday> for just that week)
-//   /day/<date>          everything on at our theatres that day
+//   /day/<date>          the plan's day view for that date
 //   /theatres            the theatres the scraper reads, switch them on or off
 //   /theatre/<id>        everything on at one theatre (?date=)
 //   /history             what everyone has watched
@@ -64,7 +65,7 @@ addEventListener('popstate', render);
 const NAV = [['/', 'Plan'], ['/movies', 'Movies'], ['/theatres', 'Theatres'], ['/history', 'History'], ['/rules', 'Rules']];
 function drawNav() {
   const here = location.pathname;
-  const active = (p) => (p === '/' ? here === '/' || here.startsWith('/day/') : here === p || here.startsWith(`${p}/`) || (p === '/movies' && here.startsWith('/movie/')) || (p === '/theatres' && here.startsWith('/theatre/')));
+  const active = (p) => (p === '/' ? here === '/' : here === p || here.startsWith(`${p}/`) || (p === '/movies' && here.startsWith('/movie/')) || (p === '/theatres' && here.startsWith('/theatre/')));
   $('nav').replaceChildren(...NAV.map(([p, label]) => el('a', { className: `btn${active(p) ? ' nav-active' : ''}`, href: p }, label)));
 }
 
@@ -91,7 +92,7 @@ async function render() {
     if (!first) await planPage();
     else if (first === 'movies') await moviesPage();
     else if (first === 'movie' && id) await moviePage(id);
-    else if (first === 'day' && isDay(id)) await dayPage(id);
+    else if (first === 'day' && isDay(id)) go(`/?view=day&date=${id}`, { replace: true });
     else if (first === 'theatres') await theatresPage();
     else if (first === 'theatre' && id) await dayPage(null, +id);
     else if (first === 'history') await historyPage();
@@ -163,149 +164,412 @@ function freshBanner(f) {
     failedSince && el('span', { className: 'muted' }, ` Last update failed: ${f.last.error ?? 'unknown error'}`));
 }
 
-// ---- plan -----------------------------------------------------------------------------------
+// ---- plan: a calendar (day / week / month / year) with the movie catalog beside it -------------------
+// The calendar is on the left, the catalog of posters on the right (along the bottom on a phone). Drag a poster
+// onto a day: if the movie has showtimes that day you pick one; if not (not showing, or the day isn't read yet) it
+// is pencilled in with a warning until a real showing is planned.
+
+const MODES = [['day', 'Day'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year']];
+let catalogTab = 'view'; // 'view': showing in the period on screen; 'wish': wishlist; 'all'
+let catalogQuery = '';
+
+const addMonths = (day, n) => {
+  const [y, m] = day.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 10);
+};
+const monthDays = (day) => {
+  const first = `${day.slice(0, 7)}-01`;
+  const out = [];
+  for (let d = first; d.slice(0, 7) === first.slice(0, 7); d = addDays(d, 1)) out.push(d);
+  return out;
+};
+const plansLink = (mode, d) => `/?view=${mode}&date=${d}`;
+const groupBy = (list, key) => {
+  const m = new Map();
+  for (const x of list) (m.get(key(x)) ?? m.set(key(x), []).get(key(x))).push(x);
+  return m;
+};
 
 async function planPage() {
-  const [g, wants, movies, shows, dayInfo, theatres] = await Promise.all([
-    groupData(), api.wants(), api.movies(), api.showtimes(), api.days(), api.theatres()]);
-  const now = Date.now();
-  const tz = localTz();
-  const thisWeek = alistWeek(now, tz);
+  const q = query();
+  const mode = MODES.some(([m]) => m === q.get('view')) ? q.get('view') : 'week';
+  const today = isoDay();
+  const date = isDay(q.get('date')) ? q.get('date') : today;
+  const [g, wants, movies, shows, dayInfo, theatres, picks] = await Promise.all([
+    groupData(), api.wants(), api.movies(), api.showtimes(), api.days(), api.theatres(), api.picks()]);
+  const ctx = {
+    g, wants, movies, shows, dayInfo, theatres, picks, today, date, mode,
+    movieById: new Map(movies.map((m) => [m.id, m])),
+    showsByDay: groupBy(shows, (s) => s.date),
+    plansByDay: groupBy(g.outings.slice().sort((a, b) => a.starts_at.localeCompare(b.starts_at)), (o) => isoDay(o.starts_at)),
+    picksByDay: groupBy(picks, (p) => p.day),
+  };
+  ctx.range = mode === 'day' ? [date] : mode === 'week' ? weekDays(weekOf(date)) : mode === 'month' ? monthDays(date) : null;
 
-  // this week and the next three, plus any later week someone has plans in
-  const weeks = new Set([0, 1, 2, 3].map((n) => addWeeks(thisWeek, n)));
-  for (const o of g.outings) {
-    const w = alistWeek(o.starts_at, o.tz);
-    if (w > thisWeek) weeks.add(w);
-  }
-
-  const resetsIn = Math.max(0, Date.parse(`${addWeeks(thisWeek, 1)}T06:00:00`) - now);
-  const days = Math.floor(resetsIn / 864e5), hours = Math.floor((resetsIn % 864e5) / 36e5);
-  const ctx = { g, now, thisWeek, dayInfo, shows, movies, theatres };
-
-  // someone dragged off a showing: take them off it
   dock({
     accepts: 'attendee', kind: 'danger', label: 'Drop here to take them off the showing', iconNode: () => icon('x'),
     onDrop: (d) => act(() => api.removeAttendee(d.outingId, d.userId), `${d.name} taken off ${d.movie}`)(),
   });
+  dock({
+    accepts: 'pick', kind: 'danger', label: 'Drop here to remove it', iconNode: () => icon('x'),
+    onDrop: (p) => act(() => api.removePick(p.id), `${p.movie_name} taken off ${fmtDate(p.day)}`)(),
+  });
 
+  const body = mode === 'day' ? dayView(ctx) : mode === 'week' ? weekView(ctx) : mode === 'month' ? monthView(ctx) : yearView(ctx);
   view(
-    heading(`A-List week · ${weekLabel(thisWeek)}`, 'Our plan',
-      el('div', { className: 'row' },
-        el('a', { className: 'btn primary', href: `/movies?week=${thisWeek}` }, icon('ticket'), 'Find a movie'),
-        el('button', { className: 'btn ghost', type: 'button', onclick: () => manualSheet(g) }, icon('plus'), 'Add by hand'))),
-    el('p', { className: 'muted' }, `Admissions reset Friday 6:00 AM, in ${days ? `${days}d ` : ''}${hours}h. Each of you gets ${PER_WEEK} a week and can hold ${PENDING} reservations at a time.`),
-    el('div', { className: 'people' }, g.members.map((m) => personCard(m, g.of(m.user_id), now, tz))),
-    movieRail(ctx, wants),
-    [...weeks].sort().map((w) => weekSection(ctx, w)),
+    planBar(ctx),
+    peopleStrip(ctx),
+    el('div', { className: `planner mode-${mode}` }, el('div', { className: 'cal' }, body), catalog(ctx)),
   );
 }
 
 /** Run something that changes the plan, then redraw. */
 const act = (fn, okMsg) => async () => {
-  try { await fn(); if (okMsg) toast(okMsg); render(); } catch (e) { toast(e.message, true); }
+  try { await fn(); if (okMsg) toast(okMsg); closeSheet(); render(); } catch (e) { toast(e.message, true); }
 };
 
-function personCard(m, adm, now, tz) {
-  const s = standing(adm, now, tz);
-  const inWeek = adm.filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === s.thisWeek)
-    .sort((a, b) => a.starts_at.localeCompare(b.starts_at));
-  const slots = Array.from({ length: PER_WEEK }, (_, i) => {
-    const a = inWeek[i];
-    if (!a) return el('div', { className: 'slot' }, 'open');
-    const past = new Date(a.starts_at) <= now;
-    const cls = past ? 'used' : a.status;
-    return el('div', { className: `slot ${cls}`, title: `${a.movie_name} · ${past ? 'used' : a.status}` }, past ? 'used' : a.status === 'reserved' ? 'booked' : 'plan');
-  });
-  const face = draggable(el('span', { className: 'grab', title: `Drag ${m.display_name} onto a showing to add them` }, avatar(m.display_name)), {
-    type: 'member', data: { userId: m.user_id, name: m.display_name },
-    ghost: () => el('span', { className: 'chip-ghost' }, avatar(m.display_name, true), m.display_name),
-  });
-  return el('article', { className: 'person' },
-    el('div', { className: 'person-head' }, face, m.display_name, m.user_id === me.id && el('span', { className: 'muted' }, '(you)')),
-    el('div', { className: 'slots', ariaLabel: `${s.usedThisWeek} of ${PER_WEEK} admissions used this week` }, slots),
-    el('div', { className: 'kv' }, 'Left this week', el('b', { className: s.leftThisWeek ? '' : 'full' }, `${s.leftThisWeek} of ${PER_WEEK}`)),
-    el('div', { className: 'kv' }, 'Reservations held', el('b', { className: s.reservedUpcoming >= PENDING ? 'full' : '' }, `${s.reservedUpcoming} of ${PENDING}`)),
-    el('div', { className: 'kv' }, 'Planned, not reserved yet', el('b', {}, s.plannedUpcoming)));
+function planBar(ctx) {
+  const { mode, date, today } = ctx;
+  const step = (n) => (mode === 'day' ? addDays(date, n) : mode === 'week' ? addDays(weekOf(date), 7 * n)
+    : mode === 'month' ? addMonths(date, n) : `${Number(date.slice(0, 4)) + n}${date.slice(4, 7)}-01`);
+  const title = mode === 'day' ? fmtDate(date, { weekday: 'long', month: 'long', day: 'numeric' })
+    : mode === 'week' ? el('span', {}, weekTitle(weekOf(date)), el('span', { className: 'muted' }, ` · ${weekLabel(weekOf(date))}`))
+    : mode === 'month' ? fmtDate(date, { month: 'long', year: 'numeric' }) : date.slice(0, 4);
+  const goTo = (d) => setQuery({ date: d === today ? '' : d });
+  return el('section', { className: 'planbar' },
+    el('div', { className: 'pb-left' },
+      el('h1', {}, 'Our plan'),
+      el('div', { className: 'pb-nav' },
+        el('button', { className: 'btn sm ghost', type: 'button', onclick: () => goTo(today) }, 'Today'),
+        el('button', { className: 'btn sm ghost icon-only', type: 'button', ariaLabel: 'Previous', onclick: () => goTo(step(-1)) }, '‹'),
+        el('button', { className: 'btn sm ghost icon-only', type: 'button', ariaLabel: 'Next', onclick: () => goTo(step(1)) }, '›'),
+        el('h2', { className: 'pb-title' }, title))),
+    el('div', { className: 'pb-right' },
+      el('div', { className: 'seg modes', role: 'tablist', ariaLabel: 'Calendar view' }, MODES.map(([m, label]) =>
+        el('button', { className: m === mode ? 'on' : '', type: 'button', role: 'tab', ariaSelected: String(m === mode), onclick: () => setQuery({ view: m === 'week' ? '' : m }) }, label))),
+      el('button', { className: 'btn sm ghost', type: 'button', onclick: () => manualSheet(ctx.g) }, icon('plus'), 'Add by hand')));
 }
 
-/** Posters to drag onto a day: the wishlist first, then everything with stored showtimes. */
-function movieRail({ g, movies, shows }, wants) {
+/** Each person: draggable face, their 4 admissions in the A-List week on screen, reservations held. */
+function peopleStrip({ g, date, mode, today }) {
+  const week = weekOf(mode === 'day' || mode === 'week' ? date : today);
+  const now = Date.now();
+  const resetsIn = Math.max(0, Date.parse(`${addDays(weekOf(today), 7)}T06:00:00`) - now);
+  return el('div', { className: 'peoplestrip' },
+    g.members.map((m) => {
+      const inWeek = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === week)
+        .sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+      const s = standing(g.of(m.user_id), now);
+      const pips = Array.from({ length: PER_WEEK }, (_, i) => {
+        const a = inWeek[i];
+        const cls = !a ? '' : new Date(a.starts_at) <= now ? 'used' : a.status;
+        return el('i', { className: `pip ${cls}`, title: a ? `${a.movie_name} · ${fmtWhen(a.starts_at, a.tz)}` : 'Open' });
+      });
+      const face = draggable(el('span', { className: 'grab', title: `Drag ${m.display_name} onto a showing to add them` }, avatar(m.display_name)), {
+        type: 'member', data: { userId: m.user_id, name: m.display_name },
+        ghost: () => el('span', { className: 'chip-ghost' }, avatar(m.display_name, true), m.display_name),
+      });
+      return el('div', { className: 'pchip' }, face,
+        el('div', {}, el('b', {}, m.display_name, m.user_id === me.id ? el('span', { className: 'muted' }, ' (you)') : ''), el('span', { className: 'pips' }, pips)),
+        el('span', { className: 'pmeta muted' }, `${Math.max(0, PER_WEEK - inWeek.length)} left${week === weekOf(today) ? ' this week' : ` · ${fmtDate(week, { month: 'short', day: 'numeric' })} wk`}`,
+          el('br'), `${s.reservedUpcoming}/${PENDING} reservations held`));
+    }),
+    el('span', { className: 'muted reset' }, `Admissions reset Fri 6 AM, in ${Math.floor(resetsIn / 864e5)}d ${Math.floor((resetsIn % 864e5) / 36e5)}h`));
+}
+
+// ---- the calendar views ---------------------------------------------------------------------------
+
+const timesFor = (ctx, movieId, day) => (ctx.showsByDay.get(day) ?? []).filter((s) => s.movieId === movieId);
+
+/** Make a day a drop target: green when the movie has showtimes that day, amber when it doesn't. */
+function dayDrop(ctx, node, day) {
+  if (day < ctx.today) return node;
+  return dropzone(node, {
+    accepts: ['movie', 'pick'],
+    hint: (data, type) => {
+      const id = type === 'pick' ? data.movie_id : data.id;
+      const n = timesFor(ctx, id, day).length;
+      return n ? ['good', `${n} times · pick one`] : ['warn', ctx.dayInfo.has(day) ? 'Not showing · pencil in' : 'No times yet · pencil in'];
+    },
+    onDrop: (data, type) => (type === 'pick' ? movePick(ctx, data, day) : dropMovie(ctx, data, day)),
+  });
+}
+
+function dropMovie(ctx, m, day) {
+  if (timesFor(ctx, m.id, day).length) return movieDaySheet(m, day, ctx.g);
+  if ((ctx.picksByDay.get(day) ?? []).some((p) => p.movie_name === m.name)) return toast(`${m.name} is already pencilled in for ${fmtDate(day)}`);
+  const why = ctx.dayInfo.has(day) ? `isn't showing on ${fmtDate(day)}` : `has no showtimes for ${fmtDate(day)} yet`;
+  return act(() => api.addPick({ day, movie_id: m.id ?? null, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }),
+    `${m.name} ${why}, so it's pencilled in with a warning`)();
+}
+
+function movePick(ctx, p, day) {
+  if (p.day === day) return;
+  if ((ctx.picksByDay.get(day) ?? []).some((x) => x.movie_name === p.movie_name)) return toast(`${p.movie_name} is already pencilled in for ${fmtDate(day)}`);
+  return act(() => api.movePick(p.id, day), `${p.movie_name} moved to ${fmtDate(day)}`)();
+}
+
+/** A planned showing: poster, time, title, who's going. Click for the details; drop a face on it to add them. */
+function planChip(ctx, o, size = 'md') {
+  const past = Date.parse(o.starts_at) <= Date.now();
+  const going = (o.attendees ?? []).filter((a) => a.status !== 'cancelled');
+  const state = past ? 'past' : going.some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
+  const chip = el('button', {
+    className: `pchipx plan ${state} ${size}`, type: 'button',
+    title: `${o.movie_name} · ${fmtWhen(o.starts_at, o.tz)} · ${state === 'past' ? 'watched' : state}`,
+    onclick: () => showingSheet(ctx.g, o),
+  },
+  size !== 'sm' && poster(o.poster_url, o.movie_name),
+  el('span', { className: 'pl-text' },
+    el('span', { className: 'pl-time' }, size === 'sm' ? fmtTime(o.starts_at, o.tz).replace(/\s?([AP])M$/i, (_, x) => x.toLowerCase()) : fmtTime(o.starts_at, o.tz), size === 'lg' && o.format && o.format !== 'Standard' ? fmtBadge(o.format) : null),
+    el('span', { className: 'pl-title' }, o.movie_name)),
+  size !== 'sm' && el('span', { className: 'faces' }, going.map((a) => avatar(nameOf(ctx.g.members, a.user_id), true))));
+  if (!past) {
+    dropzone(chip, {
+      accepts: ['member', 'attendee'],
+      onDrop: (d) => {
+        if (going.some((a) => a.user_id === d.userId)) return toast(`${d.name} is already going`);
+        act(() => api.planShowing({ id: o.id }, [d.userId]), `${d.name} added to ${o.movie_name}`)();
+      },
+    });
+  }
+  return chip;
+}
+
+function pickStatus(ctx, p) {
+  const n = timesFor(ctx, p.movie_id, p.day).length;
+  if (n) return { cls: 'ready', note: `${n} times now · pick one` };
+  return { cls: 'warn', note: ctx.dayInfo.has(p.day) ? 'Not showing this day' : 'No showtimes yet' };
+}
+
+/** A pencilled-in movie, with a warning marker until it has showtimes that day. Drag it to another day or off. */
+function pickChip(ctx, p, size = 'md') {
+  const st = pickStatus(ctx, p);
+  const m = ctx.movieById.get(p.movie_id) ?? { id: p.movie_id, name: p.movie_name, slug: p.movie_slug, poster: p.poster_url };
+  const mark = el('span', { className: `pick-mark ${st.cls}`, title: st.note, ariaLabel: st.note }, st.cls === 'warn' ? '!' : '✓');
+  const chip = el('button', {
+    className: `pchipx pick ${st.cls} ${size}`, type: 'button', title: `${p.movie_name} · pencilled in · ${st.note}`,
+    onclick: () => movieDaySheet(m, p.day, ctx.g, p),
+  },
+  size !== 'sm' ? el('span', { className: 'pp' }, poster(p.poster_url ?? m.poster, p.movie_name), mark) : mark,
+  el('span', { className: 'pl-text' },
+    size !== 'sm' && el('span', { className: 'pl-time' }, st.note),
+    el('span', { className: 'pl-title' }, p.movie_name)));
+  if (p.day >= ctx.today) {
+    draggable(chip, { type: 'pick', data: p, ghost: () => el('span', { className: 'poster-ghost' }, poster(p.poster_url ?? m.poster, p.movie_name)) });
+  }
+  return chip;
+}
+
+function dayItems(ctx, d, size) {
+  return [...(ctx.plansByDay.get(d) ?? []).map((o) => planChip(ctx, o, size)), ...(ctx.picksByDay.get(d) ?? []).map((p) => pickChip(ctx, p, size))];
+}
+
+/** Week: the A-List week (Fri → Thu) as a vertical bar of days. */
+function weekView(ctx) {
+  const w = weekOf(ctx.date);
+  const counts = ctx.g.members.map((m) => {
+    const n = ctx.g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === w).length;
+    return el('span', {}, `${m.display_name} `, el('b', { className: n >= PER_WEEK ? 'warn' : '' }, `${n}/${PER_WEEK}`));
+  });
+  return el('div', { className: 'weekcol' },
+    el('div', { className: 'wk-head' }, el('span', { className: 'counts' }, counts),
+      el('a', { className: 'btn sm ghost', href: `/movies?week=${w}` }, icon('ticket'), 'Browse this week')),
+    weekDays(w).map((d, i) => {
+      const past = d < ctx.today;
+      const info = ctx.dayInfo.get(d);
+      const items = dayItems(ctx, d, 'md');
+      return dayDrop(ctx, el('section', { className: `drow${past ? ' past' : ''}${d === ctx.today ? ' today' : ''}`, style: `--i:${i}` },
+        el('a', { className: 'drow-date', href: plansLink('day', d), title: 'Open this day' },
+          el('span', { className: 'dd-wd' }, d === ctx.today ? 'Today' : weekdayOf(d)),
+          el('b', { className: 'dd-num' }, Number(d.slice(8))),
+          el('span', { className: 'dd-mo' }, fmtDate(d, { month: 'short' }))),
+        el('div', { className: 'drow-body' },
+          items.length ? items : el('span', { className: 'drow-empty' }, past ? 'Nothing' : 'Drop a movie here')),
+        !past && el('span', { className: 'drow-meta' }, info ? `${info.count} showtimes` : 'not read yet')), d);
+    }));
+}
+
+/** Month: rows are A-List weeks (Fri → Thu). */
+function monthView(ctx) {
+  const days = monthDays(ctx.date);
+  const weeks = [];
+  for (let w = weekOf(days[0]); w <= days.at(-1); w = addDays(w, 7)) weeks.push(w);
+  const inMonth = (d) => d.slice(0, 7) === days[0].slice(0, 7);
+  return el('div', { className: 'month' },
+    el('div', { className: 'mo-head' }, weekDays(weeks[0]).map((d) => el('span', {}, weekdayOf(d)))),
+    weeks.map((w) => el('div', { className: 'mo-week' }, weekDays(w).map((d) => {
+      const items = dayItems(ctx, d, 'sm');
+      const info = ctx.dayInfo.get(d);
+      return dayDrop(ctx, el('div', { className: `mcell${inMonth(d) ? '' : ' out'}${d < ctx.today ? ' past' : ''}${d === ctx.today ? ' today' : ''}` },
+        el('a', { className: 'mc-num', href: plansLink('day', d) }, Number(d.slice(8))),
+        d >= ctx.today && info && el('span', { className: 'mc-info', title: `${info.count} showtimes stored` }, info.count),
+        el('div', { className: 'mc-items' }, items.slice(0, 3),
+          items.length > 3 && el('a', { className: 'mc-more', href: plansLink('day', d) }, `+${items.length - 3} more`))), d);
+    }))));
+}
+
+/** Year: twelve small months; a day is coloured by what's on it. */
+function yearView(ctx) {
+  const y = ctx.date.slice(0, 4);
+  const now = Date.now();
+  return el('div', { className: 'year' }, Array.from({ length: 12 }, (_, i) => {
+    const first = `${y}-${String(i + 1).padStart(2, '0')}-01`;
+    const days = monthDays(first);
+    let count = 0;
+    const weeks = [];
+    for (let w = weekOf(first); w <= days.at(-1); w = addDays(w, 7)) weeks.push(w);
+    const grid = weeks.map((w) => el('div', { className: 'ym-week' }, weekDays(w).map((d) => {
+      if (d.slice(0, 7) !== first.slice(0, 7)) return el('span', { className: 'yd out' });
+      const plans = ctx.plansByDay.get(d) ?? [];
+      const picks = ctx.picksByDay.get(d) ?? [];
+      count += plans.length;
+      const state = plans.length
+        ? (plans.every((o) => Date.parse(o.starts_at) <= now) ? 'past' : plans.some((o) => (o.attendees ?? []).some((a) => a.status === 'reserved')) ? 'reserved' : 'planned')
+        : picks.length ? 'pick' : '';
+      const tip = [...plans.map((o) => `${o.movie_name} ${fmtTime(o.starts_at, o.tz)}`), ...picks.map((p) => `${p.movie_name} (pencilled in)`)].join(', ');
+      return el('a', { className: `yd ${state}${d === ctx.today ? ' today' : ''}`, href: plansLink('day', d), title: tip ? `${fmtDate(d)}: ${tip}` : fmtDate(d) }, Number(d.slice(8)));
+    })));
+    return el('section', { className: 'ymonth', style: `--i:${i}` },
+      el('a', { className: 'ym-title', href: plansLink('month', first) }, fmtDate(first, { month: 'long' }),
+        count ? el('span', { className: 'pill planned' }, `${count} ${count === 1 ? 'movie' : 'movies'}`) : null),
+      el('div', { className: 'ym-head' }, weekDays(weeks[0]).map((d) => el('span', {}, weekdayOf(d).slice(0, 1)))),
+      grid);
+  }));
+}
+
+/** Day: a timeline of what's planned, pencilled-in movies, then everything on that day. */
+function dayView(ctx) {
+  const d = ctx.date;
+  const plans = ctx.plansByDay.get(d) ?? [];
+  const picks = ctx.picksByDay.get(d) ?? [];
+  const info = ctx.dayInfo.get(d);
+  const START = 10, END = 26, H = 46; // 10 AM to 2 AM, px per hour
+  const hourOf = (iso) => { const t = new Date(iso); const h = t.getHours(); return (h < 5 ? h + 24 : h) + t.getMinutes() / 60; };
+  const label = (h) => { const x = h % 24; return `${x % 12 || 12} ${x < 12 ? 'AM' : 'PM'}`; };
+  // side by side when showings overlap
+  const lanes = [];
+  const placed = plans.map((o) => {
+    const s = Date.parse(o.starts_at), e = Date.parse(o.ends_at);
+    let li = lanes.findIndex((end) => end <= s);
+    if (li < 0) { li = lanes.length; lanes.push(e); } else lanes[li] = e;
+    return { o, li };
+  });
+  const n = Math.max(1, lanes.length);
+  const timeline = el('div', { className: 'timeline', style: `--h:${H}px` },
+    Array.from({ length: END - START }, (_, i) => el('div', { className: 'tl-hour' }, el('span', {}, label(START + i)))),
+    placed.map(({ o, li }) => {
+      const chip = planChip(ctx, o, 'lg');
+      const top = Math.max(0, (hourOf(o.starts_at) - START) * H);
+      const height = Math.max(40, ((Date.parse(o.ends_at) - Date.parse(o.starts_at)) / 36e5) * H);
+      chip.classList.add('tl-block');
+      chip.style.cssText = `top:${top}px;height:${height}px;left:calc(52px + (100% - 52px) * ${li} / ${n});width:calc((100% - 52px) / ${n} - 6px)`;
+      return chip;
+    }));
+
+  const panel_ = dayDrop(ctx, el('section', { className: `dayview${d < ctx.today ? ' past' : ''}` },
+    el('div', { className: 'dv-head' },
+      el('span', { className: 'muted' }, d < ctx.today ? 'Past day' : info ? `${info.count} showtimes stored · checked ${ago(info.checked)}` : "Showtimes for this day haven't been read yet"),
+      d >= ctx.today && el('span', { className: 'muted' }, ' · drop a movie anywhere here')),
+    picks.length > 0 && el('div', { className: 'dv-picks' }, el('span', { className: 'muted' }, 'Pencilled in'), picks.map((p) => pickChip(ctx, p, 'md'))),
+    timeline), d);
+
+  // everything on that day, by movie
+  const on = ctx.shows.filter((s) => s.date === d);
+  const byMovie = groupBy(on, (s) => s.movieId);
+  const blocks = [...byMovie.values()].sort((a, b) => a[0].movieName.localeCompare(b[0].movieName)).map((list) => {
+    const s0 = list[0], m = ctx.movieById.get(s0.movieId) ?? { id: s0.movieId, name: s0.movieName, slug: s0.movieSlug, runTime: s0.runTime };
+    return el('section', { className: 'theatre-block movie-block' },
+      el('a', { className: 'mb-poster', href: `/movie/${m.id}?week=${weekOf(d)}` }, poster(m.poster, m.name)),
+      el('div', {},
+        el('h3', {}, link(`/movie/${m.id}?week=${weekOf(d)}`, m.name)),
+        el('div', { className: 'muted' }, [m.rating, fmtRun(m.runTime)].filter(Boolean).join(' · ')),
+        byTheatre(list, ctx.theatres, (l, th) => showtimeGroups(l, th, m, ctx.g))));
+  });
+  return [panel_,
+    el('h2', { className: 'section' }, 'On that day'),
+    blocks.length ? blocks : el('p', { className: 'empty' }, d < ctx.today ? 'Past day.' : info ? 'No showtimes this day.' : "This day hasn't been read from AMC yet; it fills in within a day or two.")];
+}
+
+// ---- the movie catalog -----------------------------------------------------------------------------
+
+function catalog(ctx) {
+  const inView = ctx.range && new Set(ctx.range);
   const daysFor = new Map();
-  for (const s of shows) (daysFor.get(s.movieId) ?? daysFor.set(s.movieId, new Set()).get(s.movieId)).add(s.date);
+  for (const s of ctx.shows) if (!inView || inView.has(s.date)) (daysFor.get(s.movieId) ?? daysFor.set(s.movieId, new Set()).get(s.movieId)).add(s.date);
   const wanted = new Map();
-  for (const w of wants) {
+  for (const w of ctx.wants) {
     const x = wanted.get(w.movie_id) ?? { id: w.movie_id, name: w.movie_name, slug: w.movie_slug, poster: w.poster_url, who: [] };
     x.who.push(w.user_id);
     wanted.set(w.movie_id, x);
   }
-  const byId = new Map(movies.map((m) => [m.id, m]));
-  const list = [
-    ...[...wanted.values()].map((w) => ({ ...w, ...(byId.get(w.id) ?? {}), who: w.who })).sort((a, b) => b.who.length - a.who.length),
-    ...movies.filter((m) => daysFor.has(m.id) && !wanted.has(m.id)).sort((a, b) => daysFor.get(b.id).size - daysFor.get(a.id).size),
-  ];
-  if (!list.length) return null;
-  return el('section', { className: 'rail-wrap' },
-    el('div', { className: 'week-head' }, el('h2', {}, 'Movies'),
-      el('span', { className: 'muted' }, 'Drag a poster onto a day to see its times, or tap it for the full week.')),
-    el('div', { className: 'rail' }, list.map((m, i) => {
-      const d = daysFor.get(m.id);
-      const card = el('a', { className: 'rail-item', href: `/movie/${m.id}`, style: `--i:${Math.min(i, 20)}` },
-        poster(m.poster, m.name),
-        el('span', { className: 'rail-name' }, m.name),
-        el('span', { className: 'rail-sub' }, d ? daysLabel([...d]) : 'No times stored'),
-        m.who?.length && el('span', { className: 'faces' }, m.who.map((id) => avatar(nameOf(g.members, id), true))));
-      return draggable(card, {
-        type: 'movie', data: m,
-        ghost: () => el('span', { className: 'poster-ghost' }, poster(m.poster, m.name)),
-      });
-    })));
-}
+  const all = [...ctx.movies.map((m) => ({ ...m, who: wanted.get(m.id)?.who ?? [] })),
+    ...[...wanted.values()].filter((w) => !ctx.movieById.has(w.id))];
+  const weekParam = ctx.mode === 'week' || ctx.mode === 'day' ? `?week=${weekOf(ctx.date)}` : '';
 
-function weekSection(ctx, week) {
-  const { g, thisWeek, now } = ctx;
-  const list = g.outings.filter((o) => alistWeek(o.starts_at, o.tz) === week);
-  const counts = g.members.map((m) => {
-    const n = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === week).length;
-    return el('span', {}, `${m.display_name} `, el('b', { className: n >= PER_WEEK ? 'warn' : '' }, `${n}/${PER_WEEK}`));
-  });
-  return el('section', { className: 'week' },
-    el('div', { className: 'week-head' },
-      el('h2', {}, weekTitle(week), el('span', { className: 'muted' }, ` · ${weekLabel(week)}`)),
-      el('div', { className: 'counts' }, counts,
-        week >= thisWeek && el('a', { className: 'btn sm ghost', href: `/movies?week=${week}` }, icon('ticket'), 'Pick a movie'))),
-    dayStrip(ctx, week, list),
-    list.length
-      ? el('ul', { className: 'showings' }, list.map((o, i) => el('li', { style: `--i:${i}` }, showingCard(g, o, now))))
-      : el('p', { className: 'empty' }, week < thisWeek ? 'Nothing that week.' : 'Nothing planned yet. Tap a day, drag a movie onto one, or ', week >= thisWeek && link(`/movies?week=${week}`, 'pick a movie'), '.'));
-}
+  const tile = (m, i) => {
+    const d = daysFor.get(m.id);
+    return draggable(el('a', { className: 'cat-tile', href: `/movie/${m.id}${weekParam}`, style: `--i:${Math.min(i, 24)}`, title: `${m.name}: drag onto a day, or tap for its showtimes` },
+      el('span', { className: 'pp' }, poster(m.poster, m.name), m.who.length > 0 && el('span', { className: 'ct-star', title: 'On the wishlist' }, '★')),
+      el('span', { className: 'ct-name' }, m.name),
+      el('span', { className: `ct-sub${d ? ' on' : ''}` }, d ? daysLabel([...d]) : inView ? 'No times on screen' : 'No times stored'),
+      m.who.length > 0 && el('span', { className: 'faces' }, m.who.map((id) => avatar(nameOf(ctx.g.members, id), true)))), {
+      type: 'movie', data: m, ghost: () => el('span', { className: 'poster-ghost' }, poster(m.poster, m.name)),
+    });
+  };
 
-/** Fri → Thu: what's planned each day, how many showtimes are stored, and a drop target for movies. */
-function dayStrip({ g, dayInfo }, week, outings) {
-  const today = isoDay();
-  return el('div', { className: 'daystrip' }, weekDays(week).map((d) => {
-    const past = d < today;
-    const plans = outings.filter((o) => isoDay(o.starts_at) === d).sort((a, b) => a.starts_at.localeCompare(b.starts_at));
-    const info = dayInfo.get(d);
-    const cell = el('a', {
-      className: `daycell${past ? ' past' : ''}${d === today ? ' today' : ''}${plans.length ? ' has' : ''}`,
-      href: `/day/${d}`, title: info ? `${info.count} showtimes stored · checked ${ago(info.checked)}` : past ? '' : 'Not read yet',
+  const grid = el('div', { className: 'cat-grid' });
+  const search = el('input', { type: 'search', placeholder: 'Search movies', value: catalogQuery, ariaLabel: 'Search movies' });
+  const tabs = el('div', { className: 'seg cat-tabs', role: 'tablist' });
+  const TABS = [['view', ctx.range ? 'On screen' : 'Showing'], ['wish', 'Wishlist'], ['all', 'All']];
+  const draw = () => {
+    catalogQuery = search.value;
+    const q = search.value.trim().toLowerCase();
+    tabs.replaceChildren(...TABS.map(([k, label]) => el('button', {
+      className: k === catalogTab ? 'on' : '', type: 'button', role: 'tab', ariaSelected: String(k === catalogTab),
+      onclick: () => { catalogTab = k; draw(); },
+    }, label)));
+    const list = all
+      .filter((m) => (catalogTab === 'view' ? daysFor.has(m.id) : catalogTab === 'wish' ? m.who.length > 0 : true))
+      .filter((m) => !q || m.name.toLowerCase().includes(q))
+      .sort((a, b) => (b.who.length > 0) - (a.who.length > 0) || (daysFor.get(b.id)?.size ?? 0) - (daysFor.get(a.id)?.size ?? 0) || a.name.localeCompare(b.name));
+    grid.replaceChildren(...(list.length ? list.map(tile) : [el('p', { className: 'muted cat-empty' },
+      q ? 'No movies match.' : catalogTab === 'view' ? 'No showtimes stored for these days yet. Try All.' : catalogTab === 'wish' ? 'Nothing starred yet.' : 'No movies yet.')]));
+  };
+  search.oninput = draw;
+  draw();
+
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('amc.catalog') === 'closed'; } catch { /* no storage */ }
+  const box = el('aside', { className: `catalog${collapsed ? ' collapsed' : ''}`, ariaLabel: 'Movie catalog' });
+  const toggle = el('button', {
+    className: 'btn sm ghost cat-toggle', type: 'button', ariaExpanded: String(!collapsed),
+    onclick: () => {
+      const c = box.classList.toggle('collapsed');
+      toggle.ariaExpanded = String(!c);
+      toggle.textContent = c ? 'Show' : 'Hide';
+      try { localStorage.setItem('amc.catalog', c ? 'closed' : 'open'); } catch { /* no storage */ }
     },
-    el('span', { className: 'dc-wd' }, d === today ? 'Today' : weekdayOf(d)),
-    el('b', { className: 'dc-num' }, Number(d.slice(8))),
-    el('span', { className: 'dc-plans' }, plans.map((o) => {
-      const state = new Date(o.starts_at) <= Date.now() ? 'past' : (o.attendees ?? []).some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
-      return el('span', { className: `dc-plan ${state}`, title: `${o.movie_name} · ${fmtTime(o.starts_at, o.tz)}` },
-        el('span', { className: 'dc-time' }, fmtTime(o.starts_at, o.tz).replace(/:00|\s/g, '').toLowerCase()),
-        el('span', { className: 'dc-title' }, o.movie_name));
-    })),
-    el('span', { className: 'dc-foot' }, past ? '' : info ? `${info.count} times` : '·'));
-    if (!past) dropzone(cell, { accepts: 'movie', onDrop: (m) => movieDaySheet(m, d, g) });
-    return cell;
-  }));
+  }, collapsed ? 'Show' : 'Hide');
+  box.append(
+    el('div', { className: 'cat-head' },
+      el('div', { className: 'cat-title' }, el('h2', {}, 'Movies'), el('span', { className: 'muted' }, `${all.length}`), toggle),
+      tabs, search),
+    el('p', { className: 'cat-hint muted' }, 'Drag a poster onto a day: green days have showtimes for it, amber ones get it pencilled in.'),
+    grid);
+  return box;
 }
+
+// ---- sheets for a planned showing and for a movie on a day ------------------------------------------
 
 const STATUS_LABEL = { planned: 'Planned', reserved: 'Reserved', cancelled: 'Cancelled' };
+
+function showingSheet(g, o) {
+  openSheet(
+    el('div', { className: 'row between' }, el('h2', { style: 'margin:0' }, 'Showing'),
+      el('button', { className: 'btn sm ghost', type: 'button', ariaLabel: 'Close', onclick: closeSheet }, icon('x'))),
+    showingCard(g, o, Date.now()));
+}
 
 function showingCard(g, o, now) {
   const past = new Date(o.starts_at) <= now;
@@ -327,22 +591,13 @@ function showingCard(g, o, now) {
       }) }, icon('seat'), a.seat ? a.seat : 'Seat'),
       el('button', { className: 'btn sm ghost danger', type: 'button', title: `Take ${name} off this showing`, onclick: act(() => api.removeAttendee(o.id, a.user_id), `${name} removed`) }, icon('x')),
     ];
-    const face = avatar(name, true);
-    if (!past) {
-      draggable(face, {
-        type: 'attendee', data: { outingId: o.id, userId: a.user_id, name, movie: o.movie_name },
-        ghost: () => el('span', { className: 'chip-ghost' }, avatar(name, true), name),
-      });
-      face.title = `Drag ${name} off to remove, or onto another showing to add them there too`;
-    }
-    return el('div', { className: 'goer' }, face, el('span', { className: 'name' }, name),
+    return el('div', { className: 'goer' }, avatar(name, true), el('span', { className: 'name' }, name),
       el('span', { className: `pill ${cls}` }, label), past && a.seat && el('span', { className: 'muted' }, a.seat),
       el('div', { className: 'acts' }, acts));
   };
 
   const notGoing = g.members.filter((m) => !going.some((a) => a.user_id === m.user_id));
   const title = o.movie_id ? link(`/movie/${o.movie_id}?week=${alistWeek(o.starts_at, o.tz)}`, o.movie_name) : o.movie_name;
-
   const card = el('article', { className: 'showing' },
     poster(o.poster_url, o.movie_name),
     el('div', { className: 'showing-main' },
@@ -359,36 +614,33 @@ function showingCard(g, o, now) {
         }, icon('plus'), m.display_name)),
         o.purchase_url && el('a', { className: 'btn sm ghost', href: o.purchase_url, target: '_blank', rel: 'noopener' }, icon('seat'), 'Seats on AMC', icon('ext')))));
   card.dataset.state = state;
-  if (!past) {
-    dropzone(card, {
-      accepts: ['member', 'attendee'],
-      onDrop: (d) => {
-        if (going.some((a) => a.user_id === d.userId && a.status !== 'cancelled')) return toast(`${d.name} is already going`);
-        act(() => api.planShowing({ id: o.id }, [d.userId]), `${d.name} added to ${o.movie_name}`)();
-      },
-    });
-  }
   return card;
 }
 
-/** A movie dropped on a day: its showtimes that day, ready to pick one. */
-async function movieDaySheet(m, day, g) {
+/** A movie on a day: its showtimes that day, ready to pick one; or pencil it in / take the pencil mark off. */
+async function movieDaySheet(m, day, g, pick = null) {
   const [shows, theatres, dayInfo] = await Promise.all([api.showtimes({ movie: m.id, date: day }), api.theatres(), api.days()]);
-  const movie = (await api.movie(m.id)) ?? m;
+  const movie = (m.id != null && (await api.movie(m.id))) || m;
   const info = dayInfo.get(day);
+  const future = day >= isoDay();
   openSheet(
     el('div', { className: 'sheet-head' },
       poster(movie.poster, movie.name),
       el('div', {},
         el('h2', {}, movie.name),
         el('p', { className: 'when big' }, fmtDate(day, { weekday: 'long', month: 'long', day: 'numeric' })),
-        el('div', { className: 'meta' }, [movie.rating, fmtRun(movie.runTime)].filter(Boolean).map((x) => el('span', {}, x)))),
+        el('div', { className: 'meta' }, [movie.rating, fmtRun(movie.runTime)].filter(Boolean).map((x) => el('span', {}, x)),
+          pick && el('span', { className: `pill ${shows.length ? 'planned' : 'warn'}` }, shows.length ? 'Pencilled in · pick a time' : 'Pencilled in'))),
       el('button', { className: 'btn sm ghost', type: 'button', ariaLabel: 'Close', onclick: closeSheet }, icon('x'))),
     shows.length
       ? byTheatre(shows, theatres, (list, t) => showtimeGroups(list, t, movie, g))
-      : el('p', { className: 'muted' }, info ? `Not showing on ${fmtDate(day)}.` : `${fmtDate(day)} hasn't been read from AMC yet; it fills in within a day or two.`),
+      : el('section', { className: 'panel notice warnbox' }, icon('warn'), el('p', {},
+        el('b', {}, info ? `Not showing on ${fmtDate(day)}. ` : `No showtimes for ${fmtDate(day)} yet. `),
+        el('span', { className: 'muted' }, info ? 'AMC has nothing for it that day.' : "That day hasn't been read from AMC yet; it fills in within a day or two."))),
     el('div', { className: 'row' },
-      el('a', { className: 'btn ghost', href: `/movie/${movie.id}?week=${weekOf(day)}` }, 'All of its times that week'),
+      future && !pick && el('button', { className: 'btn ghost', type: 'button', onclick: act(() => api.addPick({ day, movie_id: movie.id ?? null, movie_name: movie.name, movie_slug: movie.slug ?? null, poster_url: movie.poster ?? null }), `${movie.name} pencilled in for ${fmtDate(day)}`) }, 'Pencil in without a time'),
+      pick && el('button', { className: 'btn ghost danger', type: 'button', onclick: act(() => api.removePick(pick.id), `${movie.name} taken off ${fmtDate(day)}`) }, icon('x'), 'Remove pencil mark'),
+      movie.id != null && el('a', { className: 'btn ghost', href: `/movie/${movie.id}?week=${weekOf(day)}` }, 'All of its times that week'),
       el('button', { className: 'btn ghost', type: 'button', onclick: () => manualSheet(g, { movie: movie.name, day }) }, icon('plus'), 'Add by hand')));
 }
 
@@ -519,7 +771,7 @@ async function moviePage(id) {
       el('div', { className: 'daysec-head' },
         el('h3', {}, fmtDate(d, { weekday: 'long', month: 'short', day: 'numeric' }), d === today && el('span', { className: 'pill planned' }, 'Today')),
         el('span', { className: 'muted' }, info ? `checked ${ago(info.checked)}` : 'not read yet'),
-        el('a', { className: 'btn sm ghost', href: `/day/${d}` }, 'Everything that day')),
+        el('a', { className: 'btn sm ghost', href: plansLink('day', d) }, 'Plan this day')),
       list.length
         ? byTheatre(list, theatres, (l, t) => showtimeGroups(l, t, m, g))
         : el('p', { className: 'muted' }, info ? 'Not showing this day.' : "This day hasn't been read from AMC yet; it fills in within a day or two. ",
@@ -582,7 +834,7 @@ async function dayPage(date, theatreId = null) {
   if (!date) date = isDay(query().get('date')) ? query().get('date') : today;
   // a strip of the two weeks around this day, so empty or unread days show up too
   const days = weekDays(weekOf(date)).concat(weekDays(addWeeks(weekOf(date), 1))).filter((d) => d >= today);
-  const hrefFor = (d) => (t ? `/theatre/${t.id}${d === today ? '' : `?date=${d}`}` : `/day/${d}`);
+  const hrefFor = (d) => (t ? `/theatre/${t.id}${d === today ? '' : `?date=${d}`}` : plansLink('day', d));
   const strip = el('div', { className: 'dates', role: 'group', ariaLabel: 'Date' }, days.map((d) => {
     const n = all.filter((s) => s.date === d).length;
     return el('a', { className: `date${n ? '' : ' none'}`, href: hrefFor(d), ariaCurrent: d === date ? 'date' : null },
@@ -675,6 +927,7 @@ function showtimeSheet(s, t, movie, g) {
     save.setAttribute('aria-disabled', 'true');
     try {
       await api.planShowing(outing, people, who.status());
+      await api.clearPick(s.date, s.movieName).catch(() => {});
       toast(people.length > 1 ? 'Added for everyone' : 'Added to the plan');
       closeSheet();
       render();
@@ -748,6 +1001,7 @@ async function manualSheet(g, prefill = {}) {
     if (!people.length) return toast('Pick who is going', true);
     try {
       await api.planShowing(o, people, who.status());
+      await api.clearPick(day.value, o.movie_name).catch(() => {});
       toast('Added to the plan');
       closeSheet();
       render();

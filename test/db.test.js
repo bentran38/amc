@@ -199,3 +199,19 @@ test('members read scraped data but cannot write it; others see nothing; ingest 
   await as(ANN, 'update amc.theatres set scrape = true where id = 366');
   assert.equal((await as(BOB, 'select scrape from amc.theatres where id = 366')).rows[0].scrape, true);
 });
+
+test('members pencil movies in for a day, move and remove them; others see nothing', async () => {
+  const day = base, next = at(1, '12:00').slice(0, 10);
+  await as(ANN, `insert into amc.picks (day, movie_name) values ($1, 'Pencilled Movie')`, [day]);
+  await assert.rejects(as(BOB, `insert into amc.picks (day, movie_name) values ($1, 'Pencilled Movie')`, [day]), /duplicate key/);
+  const seen = await as(BOB, 'select id, created_by from amc.picks');
+  assert.equal(seen.rows.length, 1);
+  assert.equal(seen.rows[0].created_by, ANN);
+  await as(BOB, 'update amc.picks set day = $1 where id = $2', [next, seen.rows[0].id]);
+  assert.equal((await as(EVE, 'select * from amc.picks')).rows.length, 0);
+  await assert.rejects(as(EVE, `insert into amc.picks (day, movie_name) values ($1, 'Nope')`, [day]), /row-level security/);
+  await as(EVE, 'delete from amc.picks'); // silently matches nothing
+  assert.equal((await as(ANN, 'select * from amc.picks where day = $1', [next])).rows.length, 1);
+  await as(ANN, 'delete from amc.picks');
+  assert.equal((await as(BOB, 'select * from amc.picks')).rows.length, 0);
+});

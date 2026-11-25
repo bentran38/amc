@@ -4,14 +4,17 @@ Plan which movies you and your entourage spend your AMC Stubs A-List admissions 
 Static site (no framework), same Supabase project and shared login as [durpeesquid](https://github.com/bentran38/durpeesquid):
 `site/session.js` imports `https://www.durpeesquid.com/auth.js`, so the cookie session and the colour theme carry over.
 
-- **Plan** (`/`): each person's 4 admissions for this A-List week, a rail of movies (the wishlist first), and every
-  A-List week as a Friday-to-Thursday strip showing what's planned each day and how many showtimes are stored, with
-  the week's showings below. Mark a showing reserved once it is booked in the AMC app, cancel it, note a seat, add the
-  other person, or open the seat map on AMC. Each week's "Pick a movie" opens the movies for that week.
-- **Drag and drop** (mouse, or press-and-hold on a phone; the page scrolls at the screen edges): a poster onto a day
-  shows that movie's times that day; a person's face onto a showing adds them; someone dragged off a showing onto the
-  bar at the bottom is taken off it; a poster on the Movies page onto the bottom bar stars or unstars it. Everything
-  also has a button.
+- **Plan** (`/?view=day|week|month|year&date=`): a calendar beside a scrolling catalog of movie posters (along the
+  bottom on a phone), with each person's 4 admissions for the week on top. Week is the A-List week (Fri → Thu) as a
+  vertical bar of days; month has a row per A-List week; year shows twelve small months; day is a timeline with
+  everything on that day below it. Click a showing for its details: mark it reserved, cancel, note a seat, add the
+  other person, open AMC's seat map.
+- **Drag and drop** (mouse, or press-and-hold on a phone; the page scrolls at the screen edges): drag a poster onto a
+  day. While dragging, days where it has showtimes turn green ("pick a time") and the rest amber. Dropping on green
+  opens its times; dropping on amber pencils it in (`amc.picks`) with a "!" marker ("No showtimes yet" or "Not showing
+  this day") that turns into a ✓ once that day has times for it, and goes away when a real showing is planned. Drag a
+  pencilled movie to another day or onto the bar at the bottom to remove it; drag a face onto a showing to add that
+  person. Everything also has a button.
 - **Movies** (`/movies?week=<friday>`): what's showing in all stored days or in one A-List week, with which days and
   how many times. Star the ones you want to see.
 - **Movie** (`/movie/<id>?week=<friday>`): every day of the week under its own dated heading (a jump bar on top), times
