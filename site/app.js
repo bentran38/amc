@@ -30,6 +30,11 @@ const me = { id: session.user.id, name: (session.user.email ?? '').split('@')[0]
 $('app').hidden = false;
 $('signout').onclick = signOut;
 $('home-link').href = HOME;
+
+// Phones get their own layout (tab bar at the bottom, tap-first plan, bottom sheets) rather than a squeezed desktop.
+const phone = matchMedia('(max-width: 760px)');
+document.body.classList.toggle('phone', phone.matches);
+phone.addEventListener('change', () => { document.body.classList.toggle('phone', phone.matches); render(); });
 {
   const profile = await loadProfile(me.id);
   if (profile?.display_name || profile?.handle) me.name = profile.display_name || `@${profile.handle}`;
@@ -63,10 +68,15 @@ document.addEventListener('click', (e) => {
 addEventListener('popstate', render);
 
 const NAV = [['/', 'Plan'], ['/movies', 'Movies'], ['/theatres', 'Theatres'], ['/history', 'History'], ['/rules', 'Rules']];
+const TABS = [['/', 'Plan', 'cal'], ['/movies', 'Movies', 'film'], ['/history', 'History', 'clock'], ['/theatres', 'Theatres', 'pin'], ['/rules', 'Rules', 'book']];
 function drawNav() {
   const here = location.pathname;
   const active = (p) => (p === '/' ? here === '/' : here === p || here.startsWith(`${p}/`) || (p === '/movies' && here.startsWith('/movie/')) || (p === '/theatres' && here.startsWith('/theatre/')));
   $('nav').replaceChildren(...NAV.map(([p, label]) => el('a', { className: `btn${active(p) ? ' nav-active' : ''}`, href: p }, label)));
+  // the phone tab bar
+  let bar = $('tabbar');
+  if (!bar) { bar = el('nav', { id: 'tabbar', className: 'tabbar', ariaLabel: 'Sections' }); document.body.append(bar); }
+  bar.replaceChildren(...TABS.map(([p, label, ic]) => el('a', { href: p, className: active(p) ? 'on' : '', ariaCurrent: active(p) ? 'page' : null }, icon(ic), el('span', {}, label))));
 }
 
 const view = (...nodes) => {
@@ -205,6 +215,7 @@ async function planPage() {
     picksByDay: groupBy(picks, (p) => p.day),
   };
   ctx.range = mode === 'day' ? [date] : mode === 'week' ? weekDays(weekOf(date)) : mode === 'month' ? monthDays(date) : null;
+  if (phone.matches) return view(phonePlan(ctx));
 
   dock({
     accepts: 'attendee', kind: 'danger', label: 'Drop here to take them off the showing', iconNode: () => icon('x'),
@@ -228,10 +239,13 @@ const act = (fn, okMsg) => async () => {
   try { await fn(); if (okMsg) toast(okMsg); closeSheet(); render(); } catch (e) { toast(e.message, true); }
 };
 
+/** The date n days / weeks / months / years from `date`, for the ‹ › buttons. */
+const stepDate = (mode, date, n) => (mode === 'day' ? addDays(date, n) : mode === 'week' ? addDays(weekOf(date), 7 * n)
+  : mode === 'month' ? addMonths(date, n) : `${Number(date.slice(0, 4)) + n}${date.slice(4, 7)}-01`);
+
 function planBar(ctx) {
   const { mode, date, today } = ctx;
-  const step = (n) => (mode === 'day' ? addDays(date, n) : mode === 'week' ? addDays(weekOf(date), 7 * n)
-    : mode === 'month' ? addMonths(date, n) : `${Number(date.slice(0, 4)) + n}${date.slice(4, 7)}-01`);
+  const step = (n) => stepDate(mode, date, n);
   const title = mode === 'day' ? fmtDate(date, { weekday: 'long', month: 'long', day: 'numeric' })
     : mode === 'week' ? el('span', {}, weekTitle(weekOf(date)), el('span', { className: 'muted' }, ` · ${weekLabel(weekOf(date))}`))
     : mode === 'month' ? fmtDate(date, { month: 'long', year: 'numeric' }) : date.slice(0, 4);
@@ -474,7 +488,12 @@ function dayView(ctx) {
     picks.length > 0 && el('div', { className: 'dv-picks' }, el('span', { className: 'muted' }, 'Pencilled in'), picks.map((p) => pickChip(ctx, p, 'md'))),
     timeline), d);
 
-  // everything on that day, by movie
+  return [panel_, onThatDay(ctx, d)];
+}
+
+/** Everything on at our theatres that day, by movie, with times to tap. */
+function onThatDay(ctx, d) {
+  const info = ctx.dayInfo.get(d);
   const on = ctx.shows.filter((s) => s.date === d);
   const byMovie = groupBy(on, (s) => s.movieId);
   const blocks = [...byMovie.values()].sort((a, b) => a[0].movieName.localeCompare(b[0].movieName)).map((list) => {
@@ -486,9 +505,182 @@ function dayView(ctx) {
         el('div', { className: 'muted' }, [m.rating, fmtRun(m.runTime)].filter(Boolean).join(' · ')),
         byTheatre(list, ctx.theatres, (l, th) => showtimeGroups(l, th, m, ctx.g))));
   });
-  return [panel_,
+  return [
     el('h2', { className: 'section' }, 'On that day'),
     blocks.length ? blocks : el('p', { className: 'empty' }, d < ctx.today ? 'Past day.' : info ? 'No showtimes this day.' : "This day hasn't been read from AMC yet; it fills in within a day or two.")];
+}
+
+// ---- the plan on a phone ----------------------------------------------------------------------------
+// Same data and the same things you can do, laid out for a thumb: a period switcher, people as a scrolling row,
+// a Fri → Thu strip of day chips, and an agenda of full-width cards. Instead of dragging posters, each day has an
+// "Add" button that lists what's showing that day with its times (tap one to plan it) and lets you pencil in the
+// rest. Pencilled-in movies are moved or removed from their sheet; people are added from a showing's sheet.
+
+function phonePlan(ctx) {
+  const { mode, date, today } = ctx;
+  const goTo = (d) => setQuery({ date: d === today ? '' : d });
+  const w = weekOf(date);
+  const [title, sub] = mode === 'day' ? [date === today ? 'Today' : fmtDate(date, { weekday: 'long' }), fmtDate(date, { month: 'long', day: 'numeric' })]
+    : mode === 'week' ? [weekTitle(w), weekLabel(w)]
+    : mode === 'month' ? [fmtDate(date, { month: 'long' }), date.slice(0, 4)] : [date.slice(0, 4), 'Year'];
+  const head = el('section', { className: 'm-head' },
+    el('div', { className: 'm-row' },
+      el('button', { className: 'm-icon', type: 'button', ariaLabel: 'Previous', onclick: () => goTo(stepDate(mode, date, -1)) }, '‹'),
+      el('button', { className: 'm-period', type: 'button', title: 'Back to today', onclick: () => goTo(today) }, el('b', {}, title), el('small', {}, sub)),
+      el('button', { className: 'm-icon', type: 'button', ariaLabel: 'Next', onclick: () => goTo(stepDate(mode, date, 1)) }, '›')),
+    el('div', { className: 'seg m-modes', role: 'tablist', ariaLabel: 'Calendar view' }, MODES.map(([m, label]) =>
+      el('button', { className: m === mode ? 'on' : '', type: 'button', role: 'tab', ariaSelected: String(m === mode), onclick: () => setQuery({ view: m === 'week' ? '' : m }) }, label))));
+
+  const body = mode === 'week' ? phoneWeek(ctx) : mode === 'month' ? phoneMonth(ctx) : mode === 'day' ? [phoneDay(ctx, date), onThatDay(ctx, date)] : yearView(ctx);
+  return [head, phonePeople(ctx), body,
+    el('button', { className: 'btn ghost m-byhand', type: 'button', onclick: () => manualSheet(ctx.g, { day: mode === 'day' ? date : undefined }) }, icon('plus'), 'Add a showing by hand')];
+}
+
+function phonePeople({ g, date, mode, today }) {
+  const week = weekOf(mode === 'day' || mode === 'week' ? date : today);
+  const now = Date.now();
+  return el('div', { className: 'm-people' }, g.members.map((m) => {
+    const inWeek = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === week)
+      .sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+    const held = standing(g.of(m.user_id), now).reservedUpcoming;
+    return el('div', { className: 'm-person' }, avatar(m.display_name, true),
+      el('span', {}, el('b', {}, m.display_name),
+        el('span', { className: 'pips' }, Array.from({ length: PER_WEEK }, (_, i) => {
+          const a = inWeek[i];
+          return el('i', { className: `pip ${!a ? '' : new Date(a.starts_at) <= now ? 'used' : a.status}` });
+        }))),
+      el('span', { className: 'muted' }, `${Math.max(0, PER_WEEK - inWeek.length)} left · ${held}/${PENDING} held`));
+  }));
+}
+
+const dotsFor = (ctx, d) => [
+  ...(ctx.plansByDay.get(d) ?? []).map((o) => (Date.parse(o.starts_at) <= Date.now() ? 'past' : (o.attendees ?? []).some((a) => a.status === 'reserved') ? 'reserved' : 'planned')),
+  ...(ctx.picksByDay.get(d) ?? []).map(() => 'pick'),
+].slice(0, 4).map((c) => el('i', { className: c }));
+
+function phoneWeek(ctx) {
+  const days = weekDays(weekOf(ctx.date));
+  const counts = ctx.g.members.map((m) => {
+    const n = ctx.g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === weekOf(ctx.date)).length;
+    return `${m.display_name} ${n}/${PER_WEEK}`;
+  }).join(' · ');
+  return [
+    el('div', { className: 'm-days', role: 'group', ariaLabel: 'Days' }, days.map((d) => el('button', {
+      className: `m-day${d === ctx.today ? ' today' : ''}${d < ctx.today ? ' past' : ''}`, type: 'button',
+      onclick: () => document.getElementById(`d-${d}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+    }, el('span', {}, weekdayOf(d)), el('b', {}, Number(d.slice(8))), el('span', { className: 'm-dots' }, dotsFor(ctx, d))))),
+    el('p', { className: 'm-counts muted' }, counts, ' · ', link(`/movies?week=${weekOf(ctx.date)}`, 'Browse this week')),
+    days.map((d) => phoneDay(ctx, d)),
+  ];
+}
+
+function phoneMonth(ctx) {
+  const days = monthDays(ctx.date);
+  const weeks = [];
+  for (let w = weekOf(days[0]); w <= days.at(-1); w = addDays(w, 7)) weeks.push(w);
+  const inMonth = (d) => d.slice(0, 7) === days[0].slice(0, 7);
+  return [
+    el('div', { className: 'm-month' },
+      el('div', { className: 'm-mrow head' }, weekDays(weeks[0]).map((d) => el('span', {}, weekdayOf(d).slice(0, 2)))),
+      weeks.map((w) => el('div', { className: 'm-mrow' }, weekDays(w).map((d) => el('button', {
+        className: `m-mcell${inMonth(d) ? '' : ' out'}${d < ctx.today ? ' past' : ''}${d === ctx.today ? ' today' : ''}${d === ctx.date ? ' sel' : ''}`,
+        type: 'button', ariaLabel: fmtDate(d, { weekday: 'long', month: 'long', day: 'numeric' }), ariaPressed: String(d === ctx.date),
+        onclick: () => setQuery({ date: d === ctx.today ? '' : d }),
+      }, Number(d.slice(8)), el('span', { className: 'm-dots' }, dotsFor(ctx, d))))))),
+    phoneDay(ctx, ctx.date),
+  ];
+}
+
+/** One day of the agenda: what's planned, what's pencilled in, and an Add button. */
+function phoneDay(ctx, d) {
+  const past = d < ctx.today;
+  const plans = ctx.plansByDay.get(d) ?? [];
+  const picks = ctx.picksByDay.get(d) ?? [];
+  const info = ctx.dayInfo.get(d);
+  return el('section', { className: `m-agenda${past ? ' past' : ''}${d === ctx.today ? ' today' : ''}`, id: `d-${d}` },
+    el('div', { className: 'm-agenda-head' },
+      el('a', { href: plansLink('day', d) }, el('b', {}, d === ctx.today ? 'Today' : fmtDate(d, { weekday: 'long' })), ` ${fmtDate(d, { month: 'short', day: 'numeric' })}`),
+      !past && el('span', { className: 'muted' }, info ? `${info.count} times` : 'not read yet'),
+      !past && el('button', { className: 'm-add', type: 'button', onclick: () => addSheet(ctx, d) }, icon('plus'), 'Add')),
+    plans.map((o) => phonePlanCard(ctx, o)),
+    picks.map((p) => phonePickCard(ctx, p)),
+    !plans.length && !picks.length && (past
+      ? el('p', { className: 'm-none' }, 'Nothing')
+      : el('button', { className: 'm-empty', type: 'button', onclick: () => addSheet(ctx, d) }, 'Nothing planned · tap to add a movie')));
+}
+
+function phonePlanCard(ctx, o) {
+  const past = Date.parse(o.starts_at) <= Date.now();
+  const going = (o.attendees ?? []).filter((a) => a.status !== 'cancelled');
+  const state = past ? 'past' : going.some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
+  const status = past ? 'Watched' : going.every((a) => a.status === 'reserved') ? 'Reserved' : going.some((a) => a.status === 'reserved') ? 'Partly reserved' : 'Planned · not booked yet';
+  return el('button', { className: `m-card ${state}`, type: 'button', onclick: () => showingSheet(ctx.g, o) },
+    poster(o.poster_url, o.movie_name),
+    el('span', { className: 'm-card-main' },
+      el('span', { className: 'm-time' }, fmtTime(o.starts_at, o.tz), o.format && o.format !== 'Standard' ? fmtBadge(o.format) : null),
+      el('span', { className: 'm-title' }, o.movie_name),
+      el('span', { className: 'm-sub' }, el('span', { className: 'faces' }, going.map((a) => avatar(nameOf(ctx.g.members, a.user_id), true))), status)),
+    el('span', { className: 'm-chev', ariaHidden: 'true' }, '›'));
+}
+
+function phonePickCard(ctx, p) {
+  const st = pickStatus(ctx, p);
+  const m = ctx.movieById.get(p.movie_id) ?? { id: p.movie_id, name: p.movie_name, slug: p.movie_slug, poster: p.poster_url };
+  return el('button', { className: `m-card pick ${st.cls}`, type: 'button', onclick: () => movieDaySheet(m, p.day, ctx.g, p) },
+    el('span', { className: 'pp' }, poster(p.poster_url ?? m.poster, p.movie_name), el('span', { className: `pick-mark ${st.cls}` }, st.cls === 'warn' ? '!' : '✓')),
+    el('span', { className: 'm-card-main' },
+      el('span', { className: 'm-time' }, 'Pencilled in'),
+      el('span', { className: 'm-title' }, p.movie_name),
+      el('span', { className: 'm-sub' }, st.note)),
+    el('span', { className: 'm-chev', ariaHidden: 'true' }, '›'));
+}
+
+/** Add a movie to a day: what's showing with its times (tap to plan), and everything else to pencil in. */
+function addSheet(ctx, day) {
+  const info = ctx.dayInfo.get(day);
+  const showing = groupBy(ctx.showsByDay.get(day) ?? [], (s) => s.movieId);
+  const wanted = new Set(ctx.wants.map((w) => w.movie_id));
+  const pencilled = new Set((ctx.picksByDay.get(day) ?? []).map((p) => p.movie_name));
+  const extra = ctx.wants.filter((w) => !ctx.movieById.has(w.movie_id))
+    .map((w) => ({ id: w.movie_id, name: w.movie_name, slug: w.movie_slug, poster: w.poster_url }));
+  const everyone = [...ctx.movies, ...extra.filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)];
+  const order = (a, b) => wanted.has(b.id) - wanted.has(a.id) || a.name.localeCompare(b.name);
+  const search = el('input', { type: 'search', placeholder: 'Search movies', ariaLabel: 'Search movies' });
+  const list = el('div', { className: 'm-addlist' });
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    const hit = (m) => !q || m.name.toLowerCase().includes(q);
+    const on = everyone.filter((m) => showing.has(m.id) && hit(m)).sort(order);
+    const off = everyone.filter((m) => !showing.has(m.id) && hit(m)).sort(order);
+    list.replaceChildren(...[
+      el('h3', {}, on.length ? `Showing ${fmtDate(day)}` : info ? `Nothing else showing ${fmtDate(day)}` : `${fmtDate(day)} hasn't been read from AMC yet`),
+      on.length ? el('p', { className: 'muted' }, 'Tap a time to plan it.') : null,
+      on.map((m) => el('div', { className: 'm-addrow' },
+        poster(m.poster, m.name),
+        el('div', { className: 'm-addmain' },
+          el('b', {}, m.name, wanted.has(m.id) ? el('span', { className: 'star' }, ' ★') : ''),
+          el('span', { className: 'muted' }, [m.rating, fmtRun(m.runTime)].filter(Boolean).join(' · ')),
+          byTheatre(showing.get(m.id), ctx.theatres, (l, t) => showtimeGroups(l, t, m, ctx.g))))),
+      off.length > 0 && el('h3', {}, 'Pencil in'),
+      off.length > 0 && el('p', { className: 'muted' }, info ? 'These aren’t showing that day. Pencil one in and it’s marked with a warning.'
+        : 'No times for that day yet. Pencil one in; it turns into “pick a time” once AMC lists it.'),
+      off.map((m) => el('div', { className: 'm-addrow slim' },
+        poster(m.poster, m.name),
+        el('b', {}, m.name, wanted.has(m.id) ? el('span', { className: 'star' }, ' ★') : ''),
+        pencilled.has(m.name)
+          ? el('span', { className: 'pill warn' }, 'Pencilled in')
+          : el('button', { className: 'btn sm ghost warnbtn', type: 'button', onclick: act(() => api.addPick({ day, movie_id: m.id ?? null, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }), `${m.name} pencilled in for ${fmtDate(day)}`) }, 'Pencil in'))),
+      !on.length && !off.length && el('p', { className: 'muted' }, 'No movies match.'),
+    ].flat(Infinity).filter((n) => n != null && n !== false));
+  };
+  search.oninput = draw;
+  draw();
+  openSheet(
+    el('div', { className: 'row between' },
+      el('h2', { style: 'margin:0' }, fmtDate(day, { weekday: 'long', month: 'short', day: 'numeric' })),
+      el('button', { className: 'btn sm ghost', type: 'button', ariaLabel: 'Close', onclick: closeSheet }, icon('x'))),
+    search, list,
+    el('div', { className: 'row' }, el('button', { className: 'btn ghost', type: 'button', onclick: () => manualSheet(ctx.g, { day }) }, icon('plus'), 'Add by hand')));
 }
 
 // ---- the movie catalog -----------------------------------------------------------------------------
@@ -641,7 +833,11 @@ async function movieDaySheet(m, day, g, pick = null) {
       future && !pick && el('button', { className: 'btn ghost', type: 'button', onclick: act(() => api.addPick({ day, movie_id: movie.id ?? null, movie_name: movie.name, movie_slug: movie.slug ?? null, poster_url: movie.poster ?? null }), `${movie.name} pencilled in for ${fmtDate(day)}`) }, 'Pencil in without a time'),
       pick && el('button', { className: 'btn ghost danger', type: 'button', onclick: act(() => api.removePick(pick.id), `${movie.name} taken off ${fmtDate(day)}`) }, icon('x'), 'Remove pencil mark'),
       movie.id != null && el('a', { className: 'btn ghost', href: `/movie/${movie.id}?week=${weekOf(day)}` }, 'All of its times that week'),
-      el('button', { className: 'btn ghost', type: 'button', onclick: () => manualSheet(g, { movie: movie.name, day }) }, icon('plus'), 'Add by hand')));
+      el('button', { className: 'btn ghost', type: 'button', onclick: () => manualSheet(g, { movie: movie.name, day }) }, icon('plus'), 'Add by hand')),
+    pick && future && el('section', { className: 'moveto' }, el('h3', {}, 'Move it to another day'),
+      el('div', { className: 'moveto-days' }, Array.from({ length: 14 }, (_, i) => addDays(isoDay(), i)).filter((d) => d !== day).map((d) =>
+        el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.movePick(pick.id, d), `${movie.name} moved to ${fmtDate(d)}`) },
+          d === isoDay() ? 'Today' : fmtDate(d, { weekday: 'short', month: 'short', day: 'numeric' }))))));
 }
 
 // ---- movies ---------------------------------------------------------------------------------
@@ -775,6 +971,7 @@ async function moviePage(id) {
       list.length
         ? byTheatre(list, theatres, (l, t) => showtimeGroups(l, t, m, g))
         : el('p', { className: 'muted' }, info ? 'Not showing this day.' : "This day hasn't been read from AMC yet; it fills in within a day or two. ",
+          el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.addPick({ day: d, movie_id: m.id, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }), `${m.name} pencilled in for ${fmtDate(d)}`) }, 'Pencil in'),
           el('button', { className: 'btn sm ghost', type: 'button', onclick: () => manualSheet(g, { movie: m.name, day: d }) }, icon('plus'), 'Add by hand'))));
     return out;
   });
@@ -874,6 +1071,25 @@ function openSheet(...nodes) {
 }
 function closeSheet() { if (sheet.open) sheet.close(); }
 sheet.addEventListener('click', (e) => { if (e.target === sheet) closeSheet(); });
+{
+  // on a phone the sheet slides up from the bottom; pull it down by its top edge to close it
+  let y0 = null, dy = 0;
+  sheet.addEventListener('touchstart', (e) => {
+    if (!phone.matches || sheet.scrollTop > 0 || e.touches[0].clientY - sheet.getBoundingClientRect().top > 64) return;
+    y0 = e.touches[0].clientY; dy = 0;
+  }, { passive: true });
+  sheet.addEventListener('touchmove', (e) => {
+    if (y0 == null) return;
+    dy = Math.max(0, e.touches[0].clientY - y0);
+    sheet.style.transform = `translateY(${dy}px)`;
+  }, { passive: true });
+  sheet.addEventListener('touchend', () => {
+    if (y0 == null) return;
+    y0 = null;
+    sheet.style.transform = '';
+    if (dy > 90) closeSheet();
+  });
+}
 
 /** People checkboxes that re-check the A-List rules for each person as the status changes. */
 function whoPicker(g, outing, alreadyGoing = new Set()) {

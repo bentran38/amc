@@ -15,6 +15,11 @@ Static site (no framework), same Supabase project and shared login as [durpeesqu
   this day") that turns into a ✓ once that day has times for it, and goes away when a real showing is planned. Drag a
   pencilled movie to another day or onto the bar at the bottom to remove it; drag a face onto a showing to add that
   person. Everything also has a button.
+- **On a phone** (up to 760px wide) the site has its own layout: a tab bar at the bottom, sheets that slide up (swipe
+  down to close), and a tap-first plan. A period switcher (‹ This week ›, Day / Week / Month / Year), each person's
+  admissions as a scrolling row, Fri → Thu day chips with dots, and an agenda of full-width cards. Each day's **Add**
+  lists what's showing that day with its times (tap one to plan it) and lets you pencil in the rest; a pencilled
+  movie's sheet moves it to another day or removes it. Month is a tappable grid with the chosen day below.
 - **Movies** (`/movies?week=<friday>`): what's showing in all stored days or in one A-List week, with which days and
   how many times. Star the ones you want to see.
 - **Movie** (`/movie/<id>?week=<friday>`): every day of the week under its own dated heading (a jump bar on top), times
