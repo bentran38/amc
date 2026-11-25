@@ -1,6 +1,6 @@
-// Everything the pages ask for. The group's plans live in the `amc` schema
-// (supabase/migrations/20261110000000_amc.sql); movies, theatres, showtimes and seats come from the
-// AMC Theatres API through the amc-api Edge Function, which keeps the AMC key server-side.
+// Everything the pages ask for, all from the `amc` schema. The group's plans: supabase/migrations/20261110000000_amc.sql.
+// Movies and showtimes are read off amctheatres.com by the scraper (scraper/) and stored by the amc-ingest function:
+// supabase/migrations/20261125000000_amc_scrape.sql. Members only read those.
 import { supabase } from './session.js';
 
 const db = supabase.schema('amc');
@@ -41,12 +41,11 @@ export async function removeAttendee(outingId, userId) {
 
 export const deleteOuting = async (id) => ok(await db.from('outings').delete().eq('id', id));
 
-// ---- theatres the group uses ------------------------------------------------------------------
+// ---- theatres ------------------------------------------------------------------------------------
 
 export const theatres = async () => ok(await db.from('theatres').select('*').order('name'));
-export const addTheatre = async (t) =>
-  ok(await db.from('theatres').upsert({ id: t.id, name: t.name, slug: t.slug, city: t.city, state: t.state, tz: t.tz }));
-export const removeTheatre = async (id) => ok(await db.from('theatres').delete().eq('id', id));
+/** Switch the scraper on or off for a theatre. */
+export const setScrape = async (id, on) => ok(await db.from('theatres').update({ scrape: on }).eq('id', id));
 
 // ---- wants ----------------------------------------------------------------------------------
 
@@ -59,32 +58,47 @@ export const want = async (m) =>
 export const unwant = async (userId, movieId) =>
   ok(await db.from('wants').delete().eq('user_id', userId).eq('movie_id', movieId));
 
-// ---- AMC API (through the Edge Function) ------------------------------------------------------
+// ---- scraped movies and showtimes ---------------------------------------------------------------
 
-export class AmcError extends Error {
-  constructor(message, code) { super(message); this.code = code; }
+const AMC = 'https://www.amctheatres.com';
+const toMovie = (r) => ({
+  id: r.id, slug: r.slug, name: r.name, rating: r.rating, runTime: r.run_time, poster: r.poster_url,
+  url: `${AMC}/movies/${r.slug}`, firstSeen: r.first_seen,
+});
+
+let moviesCache;
+/** Every movie the scraper has seen, by id. */
+async function movieMap() {
+  moviesCache ??= ok(await db.from('movies').select('*').order('name')).map(toMovie);
+  return new Map(moviesCache.map((m) => [m.id, m]));
+}
+export const movies = async () => [...(await movieMap()).values()];
+export const movie = async (id) => (await movieMap()).get(id) ?? null;
+
+const toShowtime = (r, m) => ({
+  id: Number(r.id), theatreId: r.theatre_id, movieId: r.movie_id, movieName: m?.name ?? 'Movie', movieSlug: m?.slug ?? null,
+  rating: m?.rating ?? null, runTime: m?.runTime ?? null, utc: r.starts_at, date: r.show_date,
+  format: r.format, tags: r.tags ?? [], soldOut: r.status === 'Soldout', almostSoldOut: false,
+  alistExcluded: r.alist_excluded, auditorium: null, purchaseUrl: `${AMC}/showtimes/${r.id}/seats`, seenAt: r.seen_at,
+});
+
+/** Showtimes from today on, optionally for one theatre, movie and/or date. */
+export async function showtimes({ theatre, movie: movieId, date } = {}) {
+  let q = db.from('showtimes').select('*').gte('show_date', today());
+  if (theatre != null) q = q.eq('theatre_id', theatre);
+  if (movieId != null) q = q.eq('movie_id', movieId);
+  if (date) q = q.eq('show_date', date);
+  const [rows, ms] = await Promise.all([q.order('starts_at'), movieMap()]);
+  return ok(rows).map((r) => toShowtime(r, ms.get(r.movie_id)));
 }
 
-/** Calls the amc-api function. Throws AmcError; code 'no_key' means the AMC key isn't set up yet. */
-export async function amc(action, payload = {}) {
-  const { data, error } = await supabase.functions.invoke('amc-api', { body: { action, ...payload } });
-  if (!error) return data;
-  let detail = error.message, code;
-  try {
-    const body = await error.context.json();
-    detail = body.error || detail;
-    code = body.code;
-  } catch { /* not JSON */ }
-  throw new AmcError(detail, code);
+/** The latest scraper run, and the latest one that worked. */
+export async function freshness() {
+  const runs = ok(await db.from('scrape_runs').select('*').order('finished_at', { ascending: false }).limit(20));
+  return { last: runs[0] ?? null, lastOk: runs.find((r) => r.ok) ?? null };
 }
 
-const memo = new Map();
-/** Same as amc(), remembered for `ms` in this tab so moving between pages is instant. */
-export async function amcCached(action, payload = {}, ms = 5 * 60e3) {
-  const key = JSON.stringify([action, payload]);
-  const hit = memo.get(key);
-  if (hit && Date.now() - hit.at < ms) return hit.value;
-  const value = await amc(action, payload);
-  memo.set(key, { at: Date.now(), value });
-  return value;
-}
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};

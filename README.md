@@ -6,16 +6,17 @@ Static site (no framework), same Supabase project and shared login as [durpeesqu
 
 - **Plan** (`/`): each person's 4 admissions for this A-List week (used, booked, planned, open), how many reservations
   they hold, and every planned showing grouped by A-List week, with who is going. Mark a showing reserved once it is
-  booked in the AMC app, cancel it, note a seat, add the other person, or check how many seats are left.
-- **Movies** (`/movies`): now playing, advance tickets and coming soon from AMC, with release dates. Star the ones you want
-  to see; the plan page shows the group's wishlist.
-- **Movie** (`/movie/<id>`): showtimes at your theatres for the next two weeks, grouped by format, with sold-out and
-  almost-full flags. Pick a showtime to see the live seat map and add it to the plan for any of you. Each person is
-  checked against the A-List rules before you save.
-- **Theatres** (`/theatres`, `/theatre/<id>`): search AMC by state, city or name and save the ones you go to; a theatre
-  page lists everything on that day.
+  booked in the AMC app, cancel it, note a seat, add the other person, or open the seat map on AMC.
+- **Movies** (`/movies`): what is showing today at the tracked theatres, and movies seen on earlier days. Star the ones you
+  want to see; the plan page shows the group's wishlist.
+- **Movie** (`/movie/<id>`): today's showtimes, grouped by format, with sold-out and "Not A-List" flags (AMC marks some
+  showings, often 3D, as excluded from A-List). Pick one to add it to the plan for any of you; each person is checked
+  against the A-List rules before you save, and the AMC seat map is a link away.
+- **Theatres** (`/theatres`, `/theatre/<id>`): the theatres the scraper reads (AMC Columbia 14 on; Tysons Corner 16 set
+  up but off), with a switch for each; a theatre page lists everything on today.
 - **History**, **Rules**: what everyone has watched, and the rules below.
-- **Add by hand**: plan a showing without AMC data (also works before the AMC key is set up).
+- **Add by hand**: plan any showing on any day (suggests movies the scraper has seen and fills in their runtime). This is
+  how later days get planned, since only today's showtimes are read.
 
 ## A-List rules
 
@@ -35,32 +36,50 @@ the admission. A week is measured in the theatre's time zone.
 ## How it fits together
 
 - **Database**: its own `amc` schema (`supabase/migrations/20261110000000_amc.sql`): `theatres` (the group's list),
-  `outings` (a showing), `attendees` (who is going, planned/reserved/cancelled), `wants`, `api_cache`, the `admissions`
+  `outings` (a showing), `attendees` (who is going, planned/reserved/cancelled), `wants`, the `admissions`
   view, `members()` and `plan_showing()`. Everyone with `project_access` for slug `amc` is one entourage: they see each
   other's plans and can plan for each other. Rule checks run in triggers, one person at a time (advisory lock), so two
   phones can't both slip a fifth movie in.
-- **AMC data**: the `amc-api` Edge Function calls the AMC Theatres API (`api.amctheatres.com`, header
-  `X-AMC-Vendor-Key`) so the key never reaches the browser, and caches answers in `amc.api_cache` (movies 6 h,
-  theatres 24 h, showtimes 10 min, seats 45 s). Without the key it answers `{ code: 'no_key' }` and the site says so.
+- **Showtimes**: AMC has no public API to be had, so `scraper/` reads amctheatres.com. The site is Next.js behind
+  Cloudflare and streams its data into the page (`self.__next_f.push` chunks); `scraper/parse.js` pulls the theatre,
+  movies (name, rating, runtime, poster) and showtimes (id, UTC start, sold-out status, format group and its tags) out
+  of that. Cloudflare refuses headless Chrome and plain HTTP, and lets a visible Chrome window load **one page** before
+  refusing the next (seat pages always). So each run reads one page per theatre, today's, and stops; nothing tries to
+  get around the block. A blocked run is logged and the site shows the data as stale.
+- **Ingest**: `scraper/scrape.js` sends the result to the `amc-ingest` Edge Function with the `x-ingest-token` header
+  (`AMC_INGEST_TOKEN`, a secret good for nothing else), which calls `amc.ingest()` as the service role. That upserts
+  `movies` and `showtimes`, deletes showtimes AMC dropped from a day it read, clears ones over 2 days old, and logs the run
+  in `scrape_runs` (`supabase/migrations/20261125000000_amc_scrape.sql`). Members can only read these tables.
 - **Site**: `site/` is plain ES modules. `app.js` (pages and routing), `api.js` (data), `rules.js` (A-List rules),
   `ui.js`. Same colour themes and look as the other sites (tokens from `themes.css`).
 
 ## Setup
 
-1. **Migration**: apply `supabase/migrations/20261110000000_amc.sql`, then expose the schema
-   (`alter role authenticator set pgrst.db_schemas = '<existing list>, amc'; notify pgrst, 'reload config';`).
+1. **Migrations**: apply `supabase/migrations/20261110000000_amc.sql` and `20261125000000_amc_scrape.sql`. The `amc`
+   schema must be in `pgrst.db_schemas`.
 2. **Project row**: `insert into public.projects (slug, title, url) values ('amc', 'A-List Planner', 'https://amc.durpeesquid.com');`
    then give both of you access on the admin dashboard. The homepage icon and cover are in the main site's
    `site/project-icons.js`.
-3. **AMC key**: request a free vendor key at [developers.amctheatres.com](https://developers.amctheatres.com), then save it
-   as a function secret: `supabase secrets set AMC_VENDOR_KEY=...`.
-4. **Function**: `supabase functions deploy amc-api --no-verify-jwt` (it checks the caller itself).
-5. **Vercel**: set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` (same values as the main site);
+3. **Ingest function**: `supabase functions deploy amc-ingest --no-verify-jwt`, and set its `AMC_INGEST_TOKEN` secret
+   (32+ random characters) to the same value as in `scraper/.env`.
+4. **Vercel**: set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` (same values as the main site);
    `amc.durpeesquid.com` as the domain.
+
+## Scraper
+
+Runs on a Windows PC with Google Chrome, since Cloudflare turns away cloud runners and headless browsers.
+
+- `cd scraper && npm install`, then create `scraper/.env` (git-ignored):
+  `SUPABASE_URL=https://<project>.supabase.co` and `AMC_INGEST_TOKEN=<same as the function secret>`.
+- `node scrape.js --dry --theatre baltimore/amc-columbia-14` prints what it would store; `node --env-file=.env scrape.js`
+  stores it.
+- `scripts/scrape.ps1` runs it once and appends to `scraper/scrape.log`. Task Scheduler runs that at 8:00, 12:00, 16:00
+  and 20:00 (task "AMC showtimes"); a Chrome window opens for a few seconds each time.
+- If AMC changes its page, `parse.js` is where to look; the planner keeps working with Add by hand meanwhile.
 
 ## Local dev
 
-- `npm run dev:mock` serves the site on http://localhost:8003 with a fake sign-in, a second member, made-up movies,
-  showtimes and seat maps (`dev/`). Add `?nokey` to see the "AMC key not set up" state. Nothing in `dev/` is deployed.
+- `npm run dev:mock` serves the site on http://localhost:8003 with a fake sign-in, a second member, and made-up scraped
+  movies and showtimes (`dev/`). Add `?noruns` to see the "no showtimes yet" state. Nothing in `dev/` is deployed.
 - `npm test` runs the real migration in an in-process Postgres (PGlite) and checks the A-List rules, access rules, and
   that `site/rules.js` agrees with the SQL on what an A-List week is.

@@ -144,7 +144,6 @@ test('members can plan for each other but only for members, and wants are your o
   await assert.rejects(as(BOB, 'insert into amc.wants (user_id, movie_id, movie_name) values ($1, 2, $2)', [ANN, 'X']), /row-level security/);
   assert.equal((await as(BOB, 'select * from amc.wants')).rows.length, 1);
   assert.equal((await as(EVE, 'select * from amc.outings')).rows.length, 0);
-  await assert.rejects(as(ANN, 'select * from amc.api_cache'), /permission denied/);
 });
 
 test('JS rule check agrees with the database', () => {
@@ -156,4 +155,47 @@ test('JS rule check agrees with the database', () => {
   assert.match(r.problems[0], /4 movies/);
   assert.match(canAttend(adm, { starts_at: at(3, '11:00'), ends_at: at(3, '13:00'), tz: TZ }).problems.join(), /Overlaps/);
   assert.equal(standing(adm, Date.parse(at(0, '09:00')), TZ).usedThisWeek, 4);
+});
+
+// ---- scraped showtimes ------------------------------------------------------------------------
+
+const ingest = async (payload) => {
+  await db.exec('set role service_role');
+  try { return (await db.query('select amc.ingest($1::jsonb) as r', [JSON.stringify(payload)])).rows[0].r; }
+  finally { await db.exec('reset role'); }
+};
+const day = (offset) => new Date(Date.now() + offset * 864e5).toISOString().slice(0, 10);
+const st = (id, d, extra = {}) => ({ id, movie_id: 72478, show_date: d, starts_at: `${d}T23:00:00Z`, format: 'Dolby Cinema at AMC', format_code: 'dolbycinemaatamcprime', tags: ['Reserved Seating'], status: 'Sellable', alist_excluded: false, ...extra });
+const movie = { id: 72478, slug: 'disney-s-hexed-72478', name: "Disney's Hexed", rating: 'PG', run_time: 109, poster_url: 'https://example.com/p.jpg' };
+
+test('ingest stores showtimes and drops ones AMC no longer lists, only for the days it looked at', async () => {
+  const d1 = day(2), d2 = day(3);
+  const r1 = await ingest({ started_at: new Date().toISOString(), ok: true, pages: 2, theatres: [
+    { slug: 'amc-columbia-14', days: [d1, d2], movies: [movie], showtimes: [st(1, d1), st(2, d1), st(3, d2, { alist_excluded: true, tags: ['Excluded from A-List'] })] },
+    { slug: 'not-a-theatre-we-track', days: [d1], movies: [movie], showtimes: [st(99, d1)] },
+  ] });
+  assert.equal(r1.showtimes, 3);
+  // next run only looks at d1, where showtime 2 is gone; d2 is left alone
+  const r2 = await ingest({ started_at: new Date().toISOString(), ok: true, pages: 1, theatres: [
+    { slug: 'amc-columbia-14', days: [d1], movies: [movie], showtimes: [st(1, d1, { status: 'Soldout' })] },
+  ] });
+  assert.equal(r2.pruned, 1);
+  const rows = (await as(ANN, 'select id, status, alist_excluded, theatre_id from amc.showtimes order by id')).rows;
+  assert.deepEqual(rows.map((r) => [Number(r.id), r.status, r.alist_excluded, r.theatre_id]), [[1, 'Soldout', false, 349], [3, 'Sellable', true, 349]]);
+  const runs = (await as(ANN, 'select ok, showtimes from amc.scrape_runs order by id')).rows;
+  assert.deepEqual(runs.map((r) => [r.ok, r.showtimes]), [[true, 3], [true, 1]]);
+  const t = (await as(ANN, "select last_scraped_at from amc.theatres where id = 349")).rows[0];
+  assert.ok(t.last_scraped_at);
+});
+
+test('members read scraped data but cannot write it; others see nothing; ingest is service-only', async () => {
+  assert.ok((await as(ANN, 'select * from amc.movies')).rows.length >= 1);
+  assert.equal((await as(EVE, 'select * from amc.showtimes')).rows.length, 0);
+  assert.equal((await as(EVE, 'select * from amc.scrape_runs')).rows.length, 0);
+  await assert.rejects(as(ANN, "insert into amc.movies (id, slug, name) values (1, 'x-1', 'X')"), /permission denied/);
+  await assert.rejects(as(ANN, 'delete from amc.showtimes'), /permission denied/);
+  await assert.rejects(as(ANN, `select amc.ingest('{}'::jsonb)`), /permission denied/);
+  // members can switch a theatre on or off for the scraper
+  await as(ANN, 'update amc.theatres set scrape = true where id = 366');
+  assert.equal((await as(BOB, 'select scrape from amc.theatres where id = 366')).rows[0].scrape, true);
 });

@@ -1,0 +1,7 @@
+{
+  "name": "amc-scraper",
+  "private": true,
+  "type": "module",
+  "scripts": { "scrape": "node scrape.js", "test": "node --test" },
+  "dependencies": { "playwright-core": "1.49.1" }
+}
