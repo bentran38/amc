@@ -36,22 +36,28 @@ const FORMATS = [['Dolby Cinema at AMC Prime', 'dolbycinemaatamcprime', ['Reserv
   ['RealD 3D', 'reald3d', ['Reserved Seating', 'Excluded from A-List']]];
 const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
 
-// today only, at Columbia 14 (the last two movies aren't showing today: "Seen earlier")
+// Columbia 14, today and the next ten days, as the rotating scraper would leave it: a few days not read yet
+// (days 4 and 9), and the last two movies never showing ("Seen earlier"). Echoes of Juno opens on day 3.
+const dayPlus = (n) => { const d = new Date(now + n * DAY); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const SHOWTIMES = [];
-MOVIES.slice(0, 8).forEach((m, mi) => {
-  const fmts = [FORMATS[2], FORMATS[mi % 4 === 1 ? 0 : mi % 4 === 3 ? 3 : 1]];
-  fmts.forEach(([format, code, tags], fi) => {
-    for (const hour of [12.25, 15.5, 18.75, 21.5].slice(fi, fi + 3)) {
-      const id = 140000000 + mi * 100 + fi * 10 + Math.round(hour);
-      SHOWTIMES.push({
-        id, theatre_id: 349, movie_id: m.id, show_date: today,
-        starts_at: new Date(`${today}T${String(Math.floor(hour)).padStart(2, '0')}:${String((hour % 1) * 60).padStart(2, '0')}:00`).toISOString(),
-        format, format_code: code, tags, status: id % 7 === 0 ? 'Soldout' : 'Sellable', alist_excluded: tags.includes('Excluded from A-List'),
-        seen_at: new Date().toISOString(),
-      });
-    }
+for (const n of [0, 1, 2, 3, 5, 6, 7, 8, 10]) {
+  const day = dayPlus(n);
+  const showing = MOVIES.slice(0, 8).filter((_, mi) => (mi + n) % 5 !== 0).concat(n >= 3 ? [MOVIES[8]] : []);
+  showing.forEach((m, mi) => {
+    const fmts = [FORMATS[2], FORMATS[mi % 4 === 1 ? 0 : mi % 4 === 3 ? 3 : 1]];
+    fmts.forEach(([format, code, tags], fi) => {
+      for (const hour of [12.25, 15.5, 18.75, 21.5].slice(fi, fi + 3 - (n % 2))) {
+        const id = 140000000 + n * 10000 + (m.id % 100) * 100 + fi * 10 + Math.round(hour);
+        SHOWTIMES.push({
+          id, theatre_id: 349, movie_id: m.id, show_date: day,
+          starts_at: new Date(`${day}T${String(Math.floor(hour)).padStart(2, '0')}:${String((hour % 1) * 60).padStart(2, '0')}:00`).toISOString(),
+          format, format_code: code, tags, status: id % 7 === 0 ? 'Soldout' : 'Sellable', alist_excluded: tags.includes('Excluded from A-List'),
+          seen_at: new Date(now - (n === 0 ? 2 : 8 + n * 3) * 36e5).toISOString(),
+        });
+      }
+    });
   });
-});
+}
 const RUNS = new URLSearchParams(location.search).has('noruns') ? [] : [
   { id: 2, started_at: new Date(now - 2 * 36e5 - 60e3).toISOString(), finished_at: new Date(now - 2 * 36e5).toISOString(), ok: true, pages: 1, showtimes: SHOWTIMES.length, error: null, runner: 'local' },
 ];
@@ -114,6 +120,7 @@ class Query {
   gte(c, v) { this.filters.push((r) => r[c] >= v); return this; }
   order(c, { ascending = true } = {}) { this.sorts.push([c, ascending]); return this; }
   limit(n) { this.max = n; return this; }
+  range(a, b) { this.from = a; this.max = b - a + 1; return this; }
   maybeSingle() { this.single = true; return this; }
   insert(rows) { this.op = 'insert'; this.rows = [].concat(rows); return this; }
   upsert(rows) { this.op = 'upsert'; this.rows = [].concat(rows); return this; }
@@ -127,7 +134,7 @@ class Query {
     if (this.op === 'select') {
       let rows = t.filter(match).map((r) => (this.table === 'outings' && /attendees/.test(this.cols ?? '') ? { ...r, attendees: tables.attendees.filter((a) => a.outing_id === r.id) } : { ...r }));
       for (const [c, asc] of [...this.sorts].reverse()) rows.sort((a, b) => (a[c] > b[c] ? 1 : a[c] < b[c] ? -1 : 0) * (asc ? 1 : -1));
-      if (this.max) rows = rows.slice(0, this.max);
+      if (this.max) rows = rows.slice(this.from ?? 0, (this.from ?? 0) + this.max);
       return { data: this.single ? rows[0] ?? null : rows, error: null };
     }
     if (this.op === 'upsert' || this.op === 'insert') {

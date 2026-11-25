@@ -82,14 +82,37 @@ const toShowtime = (r, m) => ({
   alistExcluded: r.alist_excluded, auditorium: null, purchaseUrl: `${AMC}/showtimes/${r.id}/seats`, seenAt: r.seen_at,
 });
 
+let allCache;
+/** Every stored showtime from today on (all theatres), remembered for a minute so moving between pages is instant. */
+async function allShowtimes() {
+  if (allCache && Date.now() - allCache.at < 60e3) return allCache.rows;
+  const rows = [];
+  for (let from = 0; ; from += 1000) { // PostgREST hands out at most 1000 rows per request
+    const page = ok(await db.from('showtimes').select('*').gte('show_date', today()).order('starts_at').order('id').range(from, from + 999));
+    rows.push(...page);
+    if (page.length < 1000) break;
+  }
+  const ms = await movieMap();
+  allCache = { at: Date.now(), rows: rows.map((r) => toShowtime(r, ms.get(r.movie_id))) };
+  return allCache.rows;
+}
+
 /** Showtimes from today on, optionally for one theatre, movie and/or date. */
 export async function showtimes({ theatre, movie: movieId, date } = {}) {
-  let q = db.from('showtimes').select('*').gte('show_date', today());
-  if (theatre != null) q = q.eq('theatre_id', theatre);
-  if (movieId != null) q = q.eq('movie_id', movieId);
-  if (date) q = q.eq('show_date', date);
-  const [rows, ms] = await Promise.all([q.order('starts_at'), movieMap()]);
-  return ok(rows).map((r) => toShowtime(r, ms.get(r.movie_id)));
+  return (await allShowtimes()).filter((s) =>
+    (theatre == null || s.theatreId === theatre) && (movieId == null || s.movieId === movieId) && (!date || s.date === date));
+}
+
+/** For each day that has stored showtimes: { count, checked } (checked = when the scraper last read it). */
+export async function days() {
+  const out = new Map();
+  for (const s of await allShowtimes()) {
+    const d = out.get(s.date) ?? { count: 0, checked: null };
+    d.count++;
+    if (!d.checked || s.seenAt > d.checked) d.checked = s.seenAt;
+    out.set(s.date, d);
+  }
+  return out;
 }
 
 /** The latest scraper run, and the latest one that worked. */

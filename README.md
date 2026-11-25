@@ -4,19 +4,24 @@ Plan which movies you and your entourage spend your AMC Stubs A-List admissions 
 Static site (no framework), same Supabase project and shared login as [durpeesquid](https://github.com/bentran38/durpeesquid):
 `site/session.js` imports `https://www.durpeesquid.com/auth.js`, so the cookie session and the colour theme carry over.
 
-- **Plan** (`/`): each person's 4 admissions for this A-List week (used, booked, planned, open), how many reservations
-  they hold, and every planned showing grouped by A-List week, with who is going. Mark a showing reserved once it is
-  booked in the AMC app, cancel it, note a seat, add the other person, or open the seat map on AMC.
-- **Movies** (`/movies`): what is showing today at the tracked theatres, and movies seen on earlier days. Star the ones you
-  want to see; the plan page shows the group's wishlist.
-- **Movie** (`/movie/<id>`): today's showtimes, grouped by format, with sold-out and "Not A-List" flags (AMC marks some
-  showings, often 3D, as excluded from A-List). Pick one to add it to the plan for any of you; each person is checked
-  against the A-List rules before you save, and the AMC seat map is a link away.
-- **Theatres** (`/theatres`, `/theatre/<id>`): the theatres the scraper reads (AMC Columbia 14 on; Tysons Corner 16 set
-  up but off), with a switch for each; a theatre page lists everything on today.
+- **Plan** (`/`): each person's 4 admissions for this A-List week, a rail of movies (the wishlist first), and every
+  A-List week as a Friday-to-Thursday strip showing what's planned each day and how many showtimes are stored, with
+  the week's showings below. Mark a showing reserved once it is booked in the AMC app, cancel it, note a seat, add the
+  other person, or open the seat map on AMC. Each week's "Pick a movie" opens the movies for that week.
+- **Drag and drop** (mouse, or press-and-hold on a phone; the page scrolls at the screen edges): a poster onto a day
+  shows that movie's times that day; a person's face onto a showing adds them; someone dragged off a showing onto the
+  bar at the bottom is taken off it; a poster on the Movies page onto the bottom bar stars or unstars it. Everything
+  also has a button.
+- **Movies** (`/movies?week=<friday>`): what's showing in all stored days or in one A-List week, with which days and
+  how many times. Star the ones you want to see.
+- **Movie** (`/movie/<id>?week=<friday>`): every day of the week under its own dated heading (a jump bar on top), times
+  grouped by format with AMC-style badges (Dolby Cinema, IMAX with Laser, PRIME, RealD 3D, Laser) and tags such as
+  Recliners or "Not A-List" (AMC marks some showings as excluded from A-List). Days not read yet say so. Pick a time
+  to add it to the plan for any of you; each person is checked against the A-List rules before you save.
+- **Day** (`/day/<date>`) and **Theatre** (`/theatre/<id>`): everything on that day, by movie.
+- **Theatres** (`/theatres`): the theatres the scraper reads (AMC Columbia 14 on; Tysons Corner 16 set up but off).
 - **History**, **Rules**: what everyone has watched, and the rules below.
-- **Add by hand**: plan any showing on any day (suggests movies the scraper has seen and fills in their runtime). This is
-  how later days get planned, since only today's showtimes are read.
+- **Add by hand**: plan any showing on any day (suggests movies the scraper has seen and fills in their runtime).
 
 ## A-List rules
 
@@ -44,8 +49,10 @@ the admission. A week is measured in the theatre's time zone.
   Cloudflare and streams its data into the page (`self.__next_f.push` chunks); `scraper/parse.js` pulls the theatre,
   movies (name, rating, runtime, poster) and showtimes (id, UTC start, sold-out status, format group and its tags) out
   of that. Cloudflare refuses headless Chrome and plain HTTP, and lets a visible Chrome window load **one page** before
-  refusing the next (seat pages always). So each run reads one page per theatre, today's, and stops; nothing tries to
-  get around the block. A blocked run is logged and the site shows the data as stale.
+  refusing the next (seat pages always). So each run reads one page per theatre and stops; nothing tries to get
+  around the block. Which day it reads rotates: today's page once a day, otherwise the most overdue of the next 13
+  days (nearer days first), tracked in `scraper/state.json`. With four runs a day, today stays current and the rest of
+  this A-List week and all of next refresh every day or two. A blocked run is logged and the site shows it.
 - **Ingest**: `scraper/scrape.js` sends the result to the `amc-ingest` Edge Function with the `x-ingest-token` header
   (`AMC_INGEST_TOKEN`, a secret good for nothing else), which calls `amc.ingest()` as the service role. That upserts
   `movies` and `showtimes`, deletes showtimes AMC dropped from a day it read, clears ones over 2 days old, and logs the run

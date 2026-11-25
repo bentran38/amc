@@ -33,3 +33,4 @@ test/node_modules/
 .env
 .env.*
 !.env.example
+scraper/state.json

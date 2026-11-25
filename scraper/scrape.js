@@ -1,22 +1,29 @@
 // Reads the showtimes of each tracked AMC theatre off amctheatres.com and sends them to the amc-ingest function.
 //
-//   node scrape.js                                        today's showtimes at the theatres switched on in the planner
+//   node scrape.js                                        one day's showtimes at the theatres switched on in the planner
 //   node scrape.js --dry --theatre baltimore/amc-columbia-14   print what it found, store nothing
+//   node scrape.js --date 2026-12-04                      read that day instead of picking one
 //
 // Env: SUPABASE_URL, AMC_INGEST_TOKEN (not needed with --dry). Run on a schedule from this PC (scripts/scrape.ps1).
 //
 // amctheatres.com sits behind Cloudflare. A visible Chrome window (playwright-core with the installed browser) gets
 // one page through; Cloudflare refuses the next one, and headless Chrome outright. So each run reads exactly one page
-// per theatre, today's showtimes, and stops. If Cloudflare blocks it, the run is recorded as failed and the planner
-// shows the data as stale; nothing tries to get around the block.
+// per theatre and stops. If Cloudflare blocks it, the run is recorded as failed and the planner shows the data as
+// stale; nothing tries to get around the block.
+//
+// Which day: today's page once a day (first run after midnight), otherwise the most overdue of the next HORIZON days,
+// nearer days counting as more overdue. With four runs a day that keeps today current and every day of this A-List
+// week and the next refreshed every day or two. What was read when is kept in state.json next to this file.
+import { readFileSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright-core';
-import { showtimesPage, isBlocked } from './parse.js';
+import { showtimesPage, isBlocked, parseDates, flightData } from './parse.js';
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(`--${name}`);
 const opt = (name, dflt) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : dflt; };
 
 const DRY = flag('dry');
+const HORIZON = 13; // days after today worth keeping fresh: the rest of this A-List week and all of next
 const SITE = 'https://www.amctheatres.com';
 const FN = `${(process.env.SUPABASE_URL ?? '').replace(/\/$/, '')}/functions/v1/amc-ingest`;
 const TOKEN = process.env.AMC_INGEST_TOKEN ?? '';
@@ -35,8 +42,32 @@ async function fn(action, extra = {}) {
 }
 
 /** YYYY-MM-DD for "now + n days" in the theatre's time zone. */
-const localDay = (tz, n = 0) =>
-  new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Date.now() + n * 864e5));
+const localDay = (tz, n = 0, from = new Date()) =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(from.getTime() + n * 864e5));
+
+/** What was read when, per theatre: { [slug]: { read: { 'YYYY-MM-DD': iso }, offered: ['YYYY-MM-DD', ...] } } */
+const STATE = new URL('./state.json', import.meta.url);
+const loadState = () => { try { return JSON.parse(readFileSync(STATE, 'utf8')); } catch { return {}; } };
+const saveState = (st) => writeFileSync(STATE, JSON.stringify(st, null, 1));
+
+/** The day this run should read for theatre `t` (see the top of the file). */
+function pickDay(t, st) {
+  const tz = t.tz || 'America/New_York';
+  const today = localDay(tz);
+  const s = st[t.slug] ?? {};
+  const read = s.read ?? {};
+  if (!read[today] || localDay(tz, 0, new Date(read[today])) !== today) return today;
+  const offered = new Set(s.offered ?? []);
+  let best = null, bestScore = -1;
+  for (let i = 1; i <= HORIZON; i++) {
+    const d = localDay(tz, i);
+    if (offered.size && !offered.has(d)) continue;
+    const age = read[d] ? (Date.now() - Date.parse(read[d])) / 36e5 : Infinity;
+    const score = age / (1 + i / 3);
+    if (score > bestScore) { best = d; bestScore = score; }
+  }
+  return best ?? today;
+}
 
 /** Format group names and tags, read from the rendered page (the streamed data only points at them). */
 const readGroups = () => {
@@ -63,14 +94,19 @@ async function loadDay(page, t, day) {
   return { html, groups };
 }
 
-async function scrapeTheatre(page, t) {
-  const tz = t.tz || 'America/New_York';
-  const day = localDay(tz);
+async function scrapeTheatre(page, t, st) {
+  const day = opt('date') ?? pickDay(t, st);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error(`Bad --date ${day}`);
   const got = await loadDay(page, t, day);
   const r = showtimesPage(got.html, { theatreSlug: t.slug, groups: got.groups });
   if (r.theatre && t.id && r.theatre.id !== t.id) throw new Error(`${t.slug} is AMC theatre ${r.theatre.id}, expected ${t.id}`);
   log(`${t.slug} ${day}: ${r.showtimes.length} showtimes, ${r.movies.length} movies`);
-  return { slug: t.slug, days: [day], movies: r.movies, showtimes: r.showtimes.map((s) => ({ ...s, show_date: day })) };
+  const s = (st[t.slug] ??= { read: {} });
+  s.read = { ...s.read, [day]: new Date().toISOString() };
+  for (const d of Object.keys(s.read)) if (d < localDay(t.tz || 'America/New_York', -3)) delete s.read[d]; // forget old days
+  const offered = parseDates(flightData(got.html));
+  if (offered.length) s.offered = offered.slice(0, 60);
+  return { slug: t.slug, days: [day], movies: r.movies, showtimes: r.showtimes.map((x) => ({ ...x, show_date: day })) };
 }
 
 async function main() {
@@ -82,6 +118,7 @@ async function main() {
   if (!targets.length) { log('No theatres are switched on for scraping.'); return; }
 
   const started_at = new Date().toISOString();
+  const st = loadState();
   const theatres = [], errors = [];
   let pages = 0;
   // One browser, one page per theatre. With more than one theatre switched on, Cloudflare will likely refuse the
@@ -92,7 +129,7 @@ async function main() {
     for (const t of targets) {
       try {
         pages++;
-        theatres.push(await scrapeTheatre(page, t));
+        theatres.push(await scrapeTheatre(page, t, st));
       } catch (e) {
         errors.push(`${t.slug}: ${e.message}`);
         log(`! ${t.slug}: ${e.message}`);
@@ -111,6 +148,7 @@ async function main() {
   } else {
     const r = await fn('ingest', { run });
     log(`stored ${r.showtimes} showtimes (${r.pruned} dropped) from ${pages} pages`);
+    saveState(st); // only once it is stored, so a failed upload gets retried next run
   }
   if (errors.length) process.exitCode = 1;
 }

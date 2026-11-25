@@ -104,3 +104,42 @@ export const skeleton = () => [
   el('div', { className: 'skel bar' }),
   el('div', { className: 'skel-grid' }, [0, 1, 2, 3].map(() => el('div', { className: 'skel card' }))),
 ];
+
+// ---- AMC formats ------------------------------------------------------------------------------
+
+/**
+ * A badge for an AMC format group, styled after how AMC brands it ("Dolby Cinema at AMC", "IMAX with Laser at AMC",
+ * "PRIME at AMC", "RealD 3D", "Laser at AMC"). Anything else (Digital, captions, a language) is a plain label.
+ */
+export function fmtBadge(format = '', tags = []) {
+  const f = `${format} ${tags.join(' ')}`;
+  const b = (cls, ...kids) => el('span', { className: `fmtb ${cls}`, title: format }, ...kids);
+  if (/dolby/i.test(format)) return b('dolby', el('b', {}, 'DOLBY'), el('span', {}, 'CINEMA'), el('small', {}, 'at AMC'));
+  if (/imax/i.test(format)) return b('imax', el('b', {}, 'IMAX'), /laser/i.test(format) && el('small', {}, 'with Laser'));
+  if (/prime/i.test(format)) return b('prime', el('b', {}, 'PRIME'), el('small', {}, 'at AMC'));
+  if (/reald|\b3d\b/i.test(format)) return b('reald', el('b', {}, 'RealD'), el('i', {}, '3D'));
+  if (/^laser at amc$/i.test(format.trim())) return b('laser', el('b', {}, 'LASER'), el('small', {}, 'at AMC'));
+  if (/sensory/i.test(format)) return b('plain', 'Sensory Friendly');
+  if (/open caption/i.test(format)) return b('plain', 'Open Caption');
+  if (/^digital$|^standard$/i.test(format.trim()) || !format) return b('plain', /laser at amc/i.test(f) ? 'Laser' : 'Standard');
+  return b('plain', format.replace(/ Spoken with /i, ' · ').replace(/ Subtitles$/i, ' subs'));
+}
+
+// AMC's seat and series tags, shortened; the ones every showing has are left out.
+const TAG_SHORT = [
+  [/signature recliners/i, 'Recliners'], [/club rockers/i, 'Rockers'], [/artisan films/i, 'Artisan Films'],
+  [/no trailers/i, 'No trailers'], [/excluded from a-list/i, 'Not A-List'], [/open caption/i, 'Open caption'],
+];
+export const shortTags = (tags = []) =>
+  [...new Set(tags.flatMap((t) => TAG_SHORT.filter(([re]) => re.test(t)).map(([, s]) => s)))];
+
+/** "Fri, Nov 27" for a 'YYYY-MM-DD' (no time zone games: it is a calendar day). */
+export const fmtDate = (day, opts = { weekday: 'short', month: 'short', day: 'numeric' }) =>
+  new Date(`${day}T12:00:00`).toLocaleDateString([], opts);
+
+/** "3 h ago" style. */
+export function ago(iso) {
+  if (!iso) return 'never';
+  const m = (Date.now() - Date.parse(iso)) / 60e3;
+  return m < 1 ? 'just now' : m < 60 ? `${Math.round(m)} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+}
