@@ -1,0 +1,39 @@
+# Reads today's showtimes for the tracked theatres (scraper/scrape.js) and stores them through amc-ingest.
+# Runs Google Chrome in a virtual display (xvfb), the same visible-browser setup as on a PC; nothing disguises it.
+# Repo secrets: SUPABASE_URL, AMC_INGEST_TOKEN.
+name: Scrape showtimes
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: Print what it finds, store nothing
+        type: boolean
+        default: true
+  # schedule: added once a manual run gets through
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: scraper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --no-audit --no-fund
+      - name: Scrape
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          AMC_INGEST_TOKEN: ${{ secrets.AMC_INGEST_TOKEN }}
+        run: xvfb-run --auto-servernum node scrape.js ${{ inputs.dry && '--dry' || '' }}
