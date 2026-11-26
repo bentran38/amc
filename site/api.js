@@ -55,6 +55,25 @@ export async function setShowingTime(o, hhmm) {
   return ok(await db.from('outings').update({ starts_at: start.toISOString(), ends_at: new Date(start.getTime() + run).toISOString() }).eq('id', o.id));
 }
 
+/**
+ * Move a showing to another day. One picked from AMC's list was that exact showtime, so it loses its time (and its
+ * AMC link) and becomes "any time"; a time typed in by hand keeps its clock time on the new day. The database re-checks
+ * everyone going (4 a week, no overlaps) and refuses the move if it would break a rule.
+ */
+export async function moveShowing(o, day) {
+  const changes = { show_date: day };
+  if (o.showtime_id) {
+    Object.assign(changes, { showtime_id: null, purchase_url: null, auditorium: null, starts_at: null, ends_at: null });
+  } else if (o.starts_at) {
+    const hhmm = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: o.tz }).format(new Date(o.starts_at));
+    const onDay = hhmm < '05:00' ? new Date(Date.parse(`${day}T12:00:00Z`) + 864e5).toISOString().slice(0, 10) : day;
+    const start = wallToUtc(onDay, hhmm, o.tz);
+    const run = Date.parse(o.ends_at) - Date.parse(o.starts_at);
+    Object.assign(changes, { starts_at: start.toISOString(), ends_at: new Date(start.getTime() + run).toISOString() });
+  }
+  return ok(await db.from('outings').update(changes).eq('id', o.id));
+}
+
 // ---- theatres ------------------------------------------------------------------------------------
 
 export const theatres = async () => ok(await db.from('theatres').select('*').order('name'));

@@ -274,3 +274,16 @@ test('ingest stores release dates from the movies page without needing a theatre
   assert.equal(rows.find((x) => x.id === 72478).rating, 'PG');
   assert.ok(rows.every((x) => x.listed));
 });
+
+test('moving a showing to another day re-checks the A-List week of everyone going', async () => {
+  const fri = dayOf(98), nextFri = dayOf(105);
+  const d = (name, day) => ({ movie_name: name, theatre_name: 'AMC Test 12', theatre_id: 349, show_date: day, tz: TZ });
+  for (const n of [1, 2, 3, 4]) await plan(BOB, d(`Full ${n}`, dayOf(98 + n)), [BOB]);
+  const later = await plan(BOB, d('Later', nextFri), [BOB]);
+  // into the full week: refused, and nothing changes
+  await assert.rejects(as(BOB, 'update amc.outings set show_date = $2 where id = $1', [later, fri]), /already has 4 movies/);
+  assert.equal((await as(BOB, 'select show_date::text d from amc.outings where id = $1', [later])).rows[0].d, nextFri);
+  // within its own week: fine
+  await as(BOB, 'update amc.outings set show_date = $2 where id = $1', [later, dayOf(106)]);
+  assert.equal((await as(BOB, 'select show_date::text d from amc.outings where id = $1', [later])).rows[0].d, dayOf(106));
+});

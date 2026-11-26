@@ -332,13 +332,16 @@ const timesFor = (ctx, movieId, day) => (ctx.showsByDay.get(day) ?? []).filter((
 function dayDrop(ctx, node, day) {
   if (day < ctx.today) return node;
   return dropzone(node, {
-    accepts: 'movie',
-    hint: (m) => {
-      const st = movieDayStatus(ctx, m, day);
-      return st.s === 'showing' ? ['good', 'Showing that day · plan it'] : st.s === 'expected' ? ['expect', 'Expected that day · plan it']
-        : ['warn', st.s === 'not' ? 'Not showing · plan anyway' : 'Not posted yet · plan anyway'];
+    accepts: ['movie', 'showing'],
+    hint: (data, type) => {
+      const moving = type === 'showing';
+      if (moving && data.show_date === day) return ['good', 'Its day now'];
+      const st = movieDayStatus(ctx, moving ? { id: data.movie_id } : data, day);
+      const verb = moving ? 'move here' : 'plan it';
+      return st.s === 'showing' ? ['good', `Showing that day · ${verb}`] : st.s === 'expected' ? ['expect', `Expected that day · ${verb}`]
+        : ['warn', st.s === 'not' ? `Not showing · ${moving ? 'move' : 'plan'} anyway` : `Not posted yet · ${moving ? 'move' : 'plan'} anyway`];
     },
-    onDrop: (m) => movieDaySheet(m, day, ctx.g),
+    onDrop: (data, type) => (type === 'showing' ? moveTo(data, day) : movieDaySheet(data, day, ctx.g)),
   });
 }
 
@@ -365,8 +368,18 @@ function planChip(ctx, o, size = 'md') {
         act(() => api.planShowing({ id: o.id }, [d.userId]), `${d.name} added to ${o.movie_name}`)();
       },
     });
+    // drag it to another day to move it
+    draggable(chip, { type: 'showing', data: o, ghost: () => el('span', { className: 'poster-ghost' }, poster(o.poster_url, o.movie_name)) });
+    chip.title += ' · drag to another day to move it';
   }
   return chip;
+}
+
+/** Move a showing to another day (keeps who's going; see api.moveShowing for what happens to its time). */
+function moveTo(o, day) {
+  if (o.show_date === day) return;
+  const note = o.showtime_id ? ' (any time: that showtime was for the old day)' : '';
+  return act(() => api.moveShowing(o, day), `${o.movie_name} moved to ${fmtDate(day)}${note}`)();
 }
 
 /** The films opening that day, as small buttons that open the plan sheet. */
@@ -742,6 +755,10 @@ function showingCard(g, o, now) {
         o.format && o.format !== 'Standard' && fmtBadge(o.format)),
       el('div', { className: 'goers' }, going.map(goer)),
       (!past || !hasTime(o)) && timeRow,
+      !past && el('div', { className: 'moveto' }, el('span', { className: 'muted' }, 'Move to'),
+        el('div', { className: 'moveto-days' }, Array.from({ length: 14 }, (_, i) => addDays(isoDay(), i)).filter((d) => d !== o.show_date).map((d) =>
+          el('button', { className: 'btn sm ghost', type: 'button', onclick: () => moveTo(o, d) },
+            d === isoDay() ? 'Today' : fmtDate(d, { weekday: 'short', month: 'short', day: 'numeric' }))))),
       !past && el('div', { className: 'showing-foot' },
         notGoing.map((m) => el('button', {
           className: 'btn sm ghost', type: 'button',

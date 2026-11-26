@@ -11,8 +11,10 @@ Static site (no framework), same Supabase project and shared login as [durpeesqu
   note a seat, set a time, add the other person, take someone off, or open AMC's seat map.
 - **Drag and drop** (mouse, or press-and-hold on a phone; the page scrolls at the screen edges): drag a poster onto a
   day to plan it there. While dragging, days turn green (AMC lists it that day), blue (expected from its release date)
-  or amber (not listed; you can still plan it, say when you already have tickets). Drag a face onto a showing to add
-  that person, or someone off a showing onto the bar at the bottom to remove them. Everything also has a button.
+  or amber (not listed; you can still plan it, say when you already have tickets). Drag a planned showing to another
+  day to move it (a showing picked from AMC's times becomes "any time"; a time typed in keeps its clock time; the A-List
+  rules are re-checked); its details have "Move to" day buttons too. Drag a face onto a showing to add that person, or
+  someone off a showing onto the bar at the bottom to remove them. Everything also has a button.
 - **On a phone** (up to 760px wide) the site has its own layout: a tab bar at the bottom, sheets that slide up (swipe
   down to close), and a tap-first plan. A period switcher (‹ This week ›, Day / Week / Month / Year), each person's
   admissions as a scrolling row, Fri → Thu day chips with dots, and an agenda of full-width cards. Each day's **Add**
