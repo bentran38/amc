@@ -108,11 +108,11 @@ function addOuting(m, theatre, startMs, who) {
 }
 {
   const at = (days, hour) => { const d = new Date(now + days * DAY); d.setHours(hour, 30, 0, 0); return d.getTime(); };
-  addOuting(MOVIES[0], THEATRES[0], at(-2, 19), [['me', 'reserved', 'H12'], ['sam', 'reserved', 'H13']]);
-  addOuting(MOVIES[2], THEATRES[0], at(1, 20), [['me', 'reserved'], ['sam', 'planned']]);
+  addOuting(MOVIES[0], THEATRES[0], at(-2, 19), [['me', 'planned', 'H12'], ['sam', 'planned', 'H13']]);
+  addOuting(MOVIES[2], THEATRES[0], at(1, 20), [['me', 'planned'], ['sam', 'planned']]);
   addOuting(MOVIES[3], THEATRES[1], at(2, 14), [['sam', 'planned']]);
   addOuting(MOVIES[5], THEATRES[0], at(8, 21), [['me', 'planned']]);
-  addOuting(MOVIES[1], THEATRES[0], at(-9, 18), [['me', 'reserved'], ['sam', 'reserved']]);
+  addOuting(MOVIES[1], THEATRES[0], at(-9, 18), [['me', 'planned'], ['sam', 'planned']]);
 }
 
 const admissionsOf = (user) => tables.attendees.filter((a) => a.user_id === user).map((a) => {

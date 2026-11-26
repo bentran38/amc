@@ -102,7 +102,7 @@ async function render() {
     if (!first) await planPage();
     else if (first === 'movies') await moviesPage();
     else if (first === 'movie' && id) await moviePage(id);
-    else if (first === 'day' && isDay(id)) go(`/?view=day&date=${id}`, { replace: true });
+    else if (first === 'day' && isDay(id)) go(`/?date=${id}`, { replace: true });
     else if (first === 'theatres') await theatresPage();
     else if (first === 'theatre' && id) await dayPage(null, +id);
     else if (first === 'history') await historyPage();
@@ -211,7 +211,16 @@ function freshBanner(f) {
 // onto a day to plan it for that day: green if AMC lists it that day, blue if it's expected from its release date,
 // amber if neither (you can still plan it, say when you already have tickets).
 
-const MODES = [['day', 'Day'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year']];
+const MODES = [['week', 'Week'], ['month', 'Month'], ['year', 'Year']];
+// The group's A-List memberships started in November 2026: the year view runs November to October from then on, and
+// nothing before it is shown.
+const STUBS_START = '2026-11-01';
+/** The November that starts the A-List year `day` is in (never before STUBS_START). */
+function stubYear(day) {
+  const [y, m] = day.split('-').map(Number);
+  const k = Math.max(0, Math.floor(((y - 2026) * 12 + (m - 11)) / 12));
+  return addMonths(STUBS_START, 12 * k);
+}
 let catalogTab = 'view'; // 'view': showing in the period on screen; 'wish': wishlist; 'all'
 let catalogQuery = '';
 
@@ -246,14 +255,14 @@ async function planPage() {
     plansByDay: groupBy(g.outings.slice().sort(byShowing), (o) => o.show_date),
     opensByDay: groupBy(movies.filter((m) => m.release && m.kind !== 'event'), (m) => m.release),
   };
-  ctx.range = mode === 'day' ? [date] : mode === 'week' ? weekDays(weekOf(date)) : mode === 'month' ? monthDays(date) : null;
+  ctx.range = mode === 'week' ? weekDays(weekOf(date)) : mode === 'month' ? monthDays(date) : null;
   if (phone.matches) return view(phonePlan(ctx));
 
   dock({
     accepts: 'attendee', kind: 'danger', label: 'Drop here to take them off the showing', iconNode: () => icon('x'),
     onDrop: (d) => act(() => api.removeAttendee(d.outingId, d.userId), `${d.name} taken off ${d.movie}`)(),
   });
-  const body = mode === 'day' ? dayView(ctx) : mode === 'week' ? weekView(ctx) : mode === 'month' ? monthView(ctx) : yearView(ctx);
+  const body = mode === 'week' ? weekView(ctx) : mode === 'month' ? monthView(ctx) : yearView(ctx);
   view(
     planBar(ctx),
     peopleStrip(ctx),
@@ -267,22 +276,24 @@ const act = (fn, okMsg) => async () => {
 };
 
 /** The date n days / weeks / months / years from `date`, for the ‹ › buttons. */
-const stepDate = (mode, date, n) => (mode === 'day' ? addDays(date, n) : mode === 'week' ? addDays(weekOf(date), 7 * n)
-  : mode === 'month' ? addMonths(date, n) : `${Number(date.slice(0, 4)) + n}${date.slice(4, 7)}-01`);
+const stepDate = (mode, date, n) => (mode === 'week' ? addDays(weekOf(date), 7 * n)
+  : mode === 'month' ? addMonths(date, n) : addMonths(stubYear(date), 12 * n));
+/** Can the ‹ button go back from here? Not to a month or A-List year before the memberships started. */
+const canGoBack = (mode, date) => mode === 'week' || stepDate(mode, date, -1) >= STUBS_START.slice(0, 7);
+const yearTitle = (date) => `${fmtDate(stubYear(date), { month: 'short', year: 'numeric' })} – ${fmtDate(addDays(addMonths(stubYear(date), 12), -1), { month: 'short', year: 'numeric' })}`;
 
 function planBar(ctx) {
   const { mode, date, today } = ctx;
   const step = (n) => stepDate(mode, date, n);
-  const title = mode === 'day' ? fmtDate(date, { weekday: 'long', month: 'long', day: 'numeric' })
-    : mode === 'week' ? el('span', {}, weekTitle(weekOf(date)), el('span', { className: 'muted' }, ` · ${weekLabel(weekOf(date))}`))
-    : mode === 'month' ? fmtDate(date, { month: 'long', year: 'numeric' }) : date.slice(0, 4);
+  const title = mode === 'week' ? el('span', {}, weekTitle(weekOf(date)), el('span', { className: 'muted' }, ` · ${weekLabel(weekOf(date))}`))
+    : mode === 'month' ? fmtDate(date, { month: 'long', year: 'numeric' }) : yearTitle(date);
   const goTo = (d) => setQuery({ date: d === today ? '' : d });
   return el('section', { className: 'planbar' },
     el('div', { className: 'pb-left' },
       el('h1', {}, 'Our plan'),
       el('div', { className: 'pb-nav' },
         el('button', { className: 'btn sm ghost', type: 'button', onclick: () => goTo(today) }, 'Today'),
-        el('button', { className: 'btn sm ghost icon-only', type: 'button', ariaLabel: 'Previous', onclick: () => goTo(step(-1)) }, '‹'),
+        el('button', { className: 'btn sm ghost icon-only', type: 'button', ariaLabel: 'Previous', disabled: !canGoBack(mode, date), onclick: () => goTo(step(-1)) }, '‹'),
         el('button', { className: 'btn sm ghost icon-only', type: 'button', ariaLabel: 'Next', onclick: () => goTo(step(1)) }, '›'),
         el('h2', { className: 'pb-title' }, title))),
     el('div', { className: 'pb-right' },
@@ -293,16 +304,15 @@ function planBar(ctx) {
 
 /** Each person: draggable face, their 4 admissions in the A-List week on screen, reservations held. */
 function peopleStrip({ g, date, mode, today }) {
-  const week = weekOf(mode === 'day' || mode === 'week' ? date : today);
+  const week = weekOf(mode === 'week' ? date : today);
   const now = Date.now();
   const resetsIn = Math.max(0, Date.parse(`${addDays(weekOf(today), 7)}T06:00:00`) - now);
   return el('div', { className: 'peoplestrip' },
     g.members.map((m) => {
-      const inWeek = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && weekOfShowing(a) === week).sort(byShowing);
-      const s = standing(g.of(m.user_id), now);
+      const inWeek = g.of(m.user_id).filter((a) => weekOfShowing(a) === week).sort(byShowing);
       const pips = Array.from({ length: PER_WEEK }, (_, i) => {
         const a = inWeek[i];
-        const cls = !a ? '' : isPast(a) ? 'used' : a.status;
+        const cls = !a ? '' : isPast(a) ? 'used' : 'planned';
         return el('i', { className: `pip ${cls}`, title: a ? `${a.movie_name} · ${whenLabel(a)}` : 'Open' });
       });
       const face = draggable(el('span', { className: 'grab', title: `Drag ${m.display_name} onto a showing to add them` }, avatar(m.display_name)), {
@@ -312,7 +322,7 @@ function peopleStrip({ g, date, mode, today }) {
       return el('div', { className: 'pchip' }, face,
         el('div', {}, el('b', {}, m.display_name, m.user_id === me.id ? el('span', { className: 'muted' }, ' (you)') : ''), el('span', { className: 'pips' }, pips)),
         el('span', { className: 'pmeta muted' }, `${Math.max(0, PER_WEEK - inWeek.length)} left${week === weekOf(today) ? ' this week' : ` · ${fmtDate(week, { month: 'short', day: 'numeric' })} wk`}`,
-          el('br'), `${s.reservedUpcoming}/${PENDING} reservations held`));
+));
     }),
     el('span', { className: 'muted reset' }, `Admissions reset Fri 6 AM, in ${Math.floor(resetsIn / 864e5)}d ${Math.floor((resetsIn % 864e5) / 36e5)}h`));
 }
@@ -338,11 +348,11 @@ function dayDrop(ctx, node, day) {
 /** A planned showing: poster, time, title, who's going. Click for the details; drop a face on it to add them. */
 function planChip(ctx, o, size = 'md') {
   const past = isPast(o);
-  const going = (o.attendees ?? []).filter((a) => a.status !== 'cancelled');
-  const state = past ? 'past' : going.some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
+  const going = o.attendees ?? [];
+  const state = past ? 'past' : 'planned';
   const chip = el('button', {
     className: `pchipx plan ${state} ${size}`, type: 'button',
-    title: `${o.movie_name} · ${whenLabel(o)} · ${state === 'past' ? 'watched' : state}`,
+    title: `${o.movie_name} · ${whenLabel(o)}${past ? ' · watched' : ''}`,
     onclick: () => showingSheet(ctx.g, o),
   },
   size !== 'sm' && poster(o.poster_url, o.movie_name),
@@ -378,7 +388,7 @@ function dayItems(ctx, d, size) {
 function weekView(ctx) {
   const w = weekOf(ctx.date);
   const counts = ctx.g.members.map((m) => {
-    const n = ctx.g.of(m.user_id).filter((a) => a.status !== 'cancelled' && weekOfShowing(a) === w).length;
+    const n = ctx.g.of(m.user_id).filter((a) => weekOfShowing(a) === w).length;
     return el('span', {}, `${m.display_name} `, el('b', { className: n >= PER_WEEK ? 'warn' : '' }, `${n}/${PER_WEEK}`));
   });
   return el('div', { className: 'weekcol' },
@@ -389,7 +399,7 @@ function weekView(ctx) {
       const info = ctx.dayInfo.get(d);
       const items = dayItems(ctx, d, 'md');
       return dayDrop(ctx, el('section', { className: `drow${past ? ' past' : ''}${d === ctx.today ? ' today' : ''}`, style: `--i:${i}` },
-        el('a', { className: 'drow-date', href: plansLink('day', d), title: 'Open this day' },
+        el(past ? 'div' : 'button', { className: 'drow-date', ...(past ? {} : { type: 'button', title: `What's on ${fmtDate(d)}`, onclick: () => addSheet(ctx, d) }) },
           el('span', { className: 'dd-wd' }, d === ctx.today ? 'Today' : weekdayOf(d)),
           el('b', { className: 'dd-num' }, Number(d.slice(8))),
           el('span', { className: 'dd-mo' }, fmtDate(d, { month: 'short' }))),
@@ -412,19 +422,18 @@ function monthView(ctx) {
       const items = dayItems(ctx, d, 'sm');
       const info = ctx.dayInfo.get(d);
       return dayDrop(ctx, el('div', { className: `mcell${inMonth(d) ? '' : ' out'}${d < ctx.today ? ' past' : ''}${d === ctx.today ? ' today' : ''}` },
-        el('a', { className: 'mc-num', href: plansLink('day', d) }, Number(d.slice(8))),
+        el('a', { className: 'mc-num', href: `/?date=${d}`, title: 'Open this week' }, Number(d.slice(8))),
         d >= ctx.today && info && el('span', { className: 'mc-info', title: `${info.count} showtimes stored` }, info.count),
         el('div', { className: 'mc-items' }, items.slice(0, 3),
-          items.length > 3 && el('a', { className: 'mc-more', href: plansLink('day', d) }, `+${items.length - 3} more`))), d);
+          items.length > 3 && el('a', { className: 'mc-more', href: `/?date=${d}` }, `+${items.length - 3} more`))), d);
     }))));
 }
 
 /** Year: twelve small months; a day is coloured by what's on it. */
 function yearView(ctx) {
-  const y = ctx.date.slice(0, 4);
-  const now = Date.now();
+  const start = stubYear(ctx.date);
   return el('div', { className: 'year' }, Array.from({ length: 12 }, (_, i) => {
-    const first = `${y}-${String(i + 1).padStart(2, '0')}-01`;
+    const first = addMonths(start, i);
     const days = monthDays(first);
     let count = 0;
     const weeks = [];
@@ -433,76 +442,16 @@ function yearView(ctx) {
       if (d.slice(0, 7) !== first.slice(0, 7)) return el('span', { className: 'yd out' });
       const plans = ctx.plansByDay.get(d) ?? [];
       count += plans.length;
-      const state = plans.length
-        ? (plans.every(isPast) ? 'past' : plans.some((o) => (o.attendees ?? []).some((a) => a.status === 'reserved')) ? 'reserved' : 'planned')
-        : '';
+      const state = plans.length ? (plans.every(isPast) ? 'past' : 'planned') : '';
       const tip = plans.map((o) => `${o.movie_name} ${hasTime(o) ? fmtTime(o.starts_at, o.tz) : '(any time)'}`).join(', ');
-      return el('a', { className: `yd ${state}${d === ctx.today ? ' today' : ''}`, href: plansLink('day', d), title: tip ? `${fmtDate(d)}: ${tip}` : fmtDate(d) }, Number(d.slice(8)));
+      return el('a', { className: `yd ${state}${d === ctx.today ? ' today' : ''}`, href: `/?date=${d}`, title: tip ? `${fmtDate(d)}: ${tip}` : fmtDate(d) }, Number(d.slice(8)));
     })));
     return el('section', { className: 'ymonth', style: `--i:${i}` },
-      el('a', { className: 'ym-title', href: plansLink('month', first) }, fmtDate(first, { month: 'long' }),
+      el('a', { className: 'ym-title', href: plansLink('month', first) }, fmtDate(first, { month: 'long', ...(i === 0 || first.endsWith('-01-01') ? { year: 'numeric' } : {}) }),
         count ? el('span', { className: 'pill planned' }, `${count} ${count === 1 ? 'movie' : 'movies'}`) : null),
       el('div', { className: 'ym-head' }, weekDays(weeks[0]).map((d) => el('span', {}, weekdayOf(d).slice(0, 1)))),
       grid);
   }));
-}
-
-/** Day: a timeline of what's planned (showings without a time above it), then everything on that day. */
-function dayView(ctx) {
-  const d = ctx.date;
-  const plans = ctx.plansByDay.get(d) ?? [];
-  const info = ctx.dayInfo.get(d);
-  const START = 10, END = 26, H = 46; // 10 AM to 2 AM, px per hour
-  const hourOf = (iso) => { const t = new Date(iso); const h = t.getHours(); return (h < 5 ? h + 24 : h) + t.getMinutes() / 60; };
-  const label = (h) => { const x = h % 24; return `${x % 12 || 12} ${x < 12 ? 'AM' : 'PM'}`; };
-  // side by side when showings overlap
-  const lanes = [];
-  const untimed = plans.filter((o) => !hasTime(o));
-  const placed = plans.filter(hasTime).map((o) => {
-    const s = Date.parse(o.starts_at), e = Date.parse(o.ends_at);
-    let li = lanes.findIndex((end) => end <= s);
-    if (li < 0) { li = lanes.length; lanes.push(e); } else lanes[li] = e;
-    return { o, li };
-  });
-  const n = Math.max(1, lanes.length);
-  const timeline = el('div', { className: 'timeline', style: `--h:${H}px` },
-    Array.from({ length: END - START }, (_, i) => el('div', { className: 'tl-hour' }, el('span', {}, label(START + i)))),
-    placed.map(({ o, li }) => {
-      const chip = planChip(ctx, o, 'lg');
-      const top = Math.max(0, (hourOf(o.starts_at) - START) * H);
-      const height = Math.max(40, ((Date.parse(o.ends_at) - Date.parse(o.starts_at)) / 36e5) * H);
-      chip.classList.add('tl-block');
-      chip.style.cssText = `top:${top}px;height:${height}px;left:calc(52px + (100% - 52px) * ${li} / ${n});width:calc((100% - 52px) / ${n} - 6px)`;
-      return chip;
-    }));
-
-  const panel_ = dayDrop(ctx, el('section', { className: `dayview${d < ctx.today ? ' past' : ''}` },
-    el('div', { className: 'dv-head' },
-      el('span', { className: 'muted' }, d < ctx.today ? 'Past day' : info ? `${info.count} showtimes stored · checked ${ago(info.checked)}` : "Showtimes for this day haven't been read yet"),
-      d >= ctx.today && el('span', { className: 'muted' }, ' · drop a movie anywhere here')),
-    untimed.length > 0 && el('div', { className: 'dv-row' }, el('span', { className: 'muted' }, 'Any time'), untimed.map((o) => planChip(ctx, o, 'md'))),
-    timeline), d);
-
-  return [panel_, onThatDay(ctx, d)];
-}
-
-/** Everything on at our theatres that day, by movie, with times to tap. */
-function onThatDay(ctx, d) {
-  const info = ctx.dayInfo.get(d);
-  const on = ctx.shows.filter((s) => s.date === d);
-  const byMovie = groupBy(on, (s) => s.movieId);
-  const blocks = [...byMovie.values()].sort((a, b) => a[0].movieName.localeCompare(b[0].movieName)).map((list) => {
-    const s0 = list[0], m = ctx.movieById.get(s0.movieId) ?? { id: s0.movieId, name: s0.movieName, slug: s0.movieSlug, runTime: s0.runTime };
-    return el('section', { className: 'theatre-block movie-block' },
-      el('a', { className: 'mb-poster', href: `/movie/${m.id}?week=${weekOf(d)}` }, poster(m.poster, m.name)),
-      el('div', {},
-        el('h3', {}, link(`/movie/${m.id}?week=${weekOf(d)}`, m.name)),
-        el('div', { className: 'muted' }, [m.rating, fmtRun(m.runTime)].filter(Boolean).join(' · ')),
-        byTheatre(list, ctx.theatres, (l, th) => showtimeGroups(l, th, m, ctx.g))));
-  });
-  return [
-    el('h2', { className: 'section' }, 'On that day'),
-    blocks.length ? blocks : el('p', { className: 'empty' }, d < ctx.today ? 'Past day.' : info ? 'No showtimes this day.' : "This day hasn't been read from AMC yet; it fills in within a day or two.")];
 }
 
 // ---- the plan on a phone ----------------------------------------------------------------------------
@@ -515,46 +464,44 @@ function phonePlan(ctx) {
   const { mode, date, today } = ctx;
   const goTo = (d) => setQuery({ date: d === today ? '' : d });
   const w = weekOf(date);
-  const [title, sub] = mode === 'day' ? [date === today ? 'Today' : fmtDate(date, { weekday: 'long' }), fmtDate(date, { month: 'long', day: 'numeric' })]
-    : mode === 'week' ? [weekTitle(w), weekLabel(w)]
-    : mode === 'month' ? [fmtDate(date, { month: 'long' }), date.slice(0, 4)] : [date.slice(0, 4), 'Year'];
+  const [title, sub] = mode === 'week' ? [weekTitle(w), weekLabel(w)]
+    : mode === 'month' ? [fmtDate(date, { month: 'long' }), date.slice(0, 4)] : ['A-List year', yearTitle(date)];
   const head = el('section', { className: 'm-head' },
     el('div', { className: 'm-row' },
-      el('button', { className: 'm-icon', type: 'button', ariaLabel: 'Previous', onclick: () => goTo(stepDate(mode, date, -1)) }, '‹'),
+      el('button', { className: 'm-icon', type: 'button', ariaLabel: 'Previous', disabled: !canGoBack(mode, date), onclick: () => goTo(stepDate(mode, date, -1)) }, '‹'),
       el('button', { className: 'm-period', type: 'button', title: 'Back to today', onclick: () => goTo(today) }, el('b', {}, title), el('small', {}, sub)),
       el('button', { className: 'm-icon', type: 'button', ariaLabel: 'Next', onclick: () => goTo(stepDate(mode, date, 1)) }, '›')),
     el('div', { className: 'seg m-modes', role: 'tablist', ariaLabel: 'Calendar view' }, MODES.map(([m, label]) =>
       el('button', { className: m === mode ? 'on' : '', type: 'button', role: 'tab', ariaSelected: String(m === mode), onclick: () => setQuery({ view: m === 'week' ? '' : m }) }, label))));
 
-  const body = mode === 'week' ? phoneWeek(ctx) : mode === 'month' ? phoneMonth(ctx) : mode === 'day' ? [phoneDay(ctx, date), onThatDay(ctx, date)] : yearView(ctx);
+  const body = mode === 'week' ? phoneWeek(ctx) : mode === 'month' ? phoneMonth(ctx) : yearView(ctx);
   return [head, phonePeople(ctx), body,
-    el('button', { className: 'btn ghost m-byhand', type: 'button', onclick: () => manualSheet(ctx.g, { day: mode === 'day' ? date : undefined }) }, icon('plus'), 'Add a showing by hand')];
+    el('button', { className: 'btn ghost m-byhand', type: 'button', onclick: () => manualSheet(ctx.g) }, icon('plus'), 'Add a showing by hand')];
 }
 
 function phonePeople({ g, date, mode, today }) {
-  const week = weekOf(mode === 'day' || mode === 'week' ? date : today);
+  const week = weekOf(mode === 'week' ? date : today);
   const now = Date.now();
   return el('div', { className: 'm-people' }, g.members.map((m) => {
-    const inWeek = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && weekOfShowing(a) === week).sort(byShowing);
-    const held = standing(g.of(m.user_id), now).reservedUpcoming;
+    const inWeek = g.of(m.user_id).filter((a) => weekOfShowing(a) === week).sort(byShowing);
     return el('div', { className: 'm-person' }, avatar(m.display_name, true),
       el('span', {}, el('b', {}, m.display_name),
         el('span', { className: 'pips' }, Array.from({ length: PER_WEEK }, (_, i) => {
           const a = inWeek[i];
-          return el('i', { className: `pip ${!a ? '' : isPast(a) ? 'used' : a.status}` });
+          return el('i', { className: `pip ${!a ? '' : isPast(a) ? 'used' : 'planned'}` });
         }))),
-      el('span', { className: 'muted' }, `${Math.max(0, PER_WEEK - inWeek.length)} left · ${held}/${PENDING} held`));
+      el('span', { className: 'muted' }, `${Math.max(0, PER_WEEK - inWeek.length)} of ${PER_WEEK} left`));
   }));
 }
 
 const dotsFor = (ctx, d) => [
-  ...(ctx.plansByDay.get(d) ?? []).map((o) => (isPast(o) ? 'past' : (o.attendees ?? []).some((a) => a.status === 'reserved') ? 'reserved' : 'planned')),
+  ...(ctx.plansByDay.get(d) ?? []).map((o) => (isPast(o) ? 'past' : 'planned')),
 ].slice(0, 4).map((c) => el('i', { className: c }));
 
 function phoneWeek(ctx) {
   const days = weekDays(weekOf(ctx.date));
   const counts = ctx.g.members.map((m) => {
-    const n = ctx.g.of(m.user_id).filter((a) => a.status !== 'cancelled' && weekOfShowing(a) === weekOf(ctx.date)).length;
+    const n = ctx.g.of(m.user_id).filter((a) => weekOfShowing(a) === weekOf(ctx.date)).length;
     return `${m.display_name} ${n}/${PER_WEEK}`;
   }).join(' · ');
   return [
@@ -591,7 +538,7 @@ function phoneDay(ctx, d) {
   const info = ctx.dayInfo.get(d);
   return el('section', { className: `m-agenda${past ? ' past' : ''}${d === ctx.today ? ' today' : ''}`, id: `d-${d}` },
     el('div', { className: 'm-agenda-head' },
-      el('a', { href: plansLink('day', d) }, el('b', {}, d === ctx.today ? 'Today' : fmtDate(d, { weekday: 'long' })), ` ${fmtDate(d, { month: 'short', day: 'numeric' })}`),
+      el('span', { className: 'm-date' }, el('b', {}, d === ctx.today ? 'Today' : fmtDate(d, { weekday: 'long' })), ` ${fmtDate(d, { month: 'short', day: 'numeric' })}`),
       !past && el('span', { className: 'muted' }, info ? `${info.count} times` : 'not read yet'),
       !past && el('button', { className: 'm-add', type: 'button', onclick: () => addSheet(ctx, d) }, icon('plus'), 'Add')),
     plans.map((o) => phonePlanCard(ctx, o)),
@@ -603,9 +550,9 @@ function phoneDay(ctx, d) {
 
 function phonePlanCard(ctx, o) {
   const past = isPast(o);
-  const going = (o.attendees ?? []).filter((a) => a.status !== 'cancelled');
-  const state = past ? 'past' : going.some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
-  const status = past ? 'Watched' : going.every((a) => a.status === 'reserved') ? 'Reserved' : going.some((a) => a.status === 'reserved') ? 'Partly reserved' : 'Planned · not booked yet';
+  const going = o.attendees ?? [];
+  const state = past ? 'past' : 'planned';
+  const status = past ? 'Watched' : going.length > 1 ? `${going.length} going` : 'Going';
   return el('button', { className: `m-card ${state}`, type: 'button', onclick: () => showingSheet(ctx.g, o) },
     poster(o.poster_url, o.movie_name),
     el('span', { className: 'm-card-main' },
@@ -682,7 +629,7 @@ function catalog(ctx) {
   }
   const all = [...ctx.movies.map((m) => ({ ...m, who: wanted.get(m.id)?.who ?? [] })),
     ...[...wanted.values()].filter((w) => !ctx.movieById.has(w.id))];
-  const weekParam = ctx.mode === 'week' || ctx.mode === 'day' ? `?week=${weekOf(ctx.date)}` : '';
+  const weekParam = ctx.mode === 'week' ? `?week=${weekOf(ctx.date)}` : '';
   // expected on a day on screen (from today on), going by its release date
   const expIn = (m) => !daysFor.has(m.id) && (ctx.range
     ? ctx.range.some((d) => d >= ctx.today && movieDayStatus(ctx, m, d).s === 'expected')
@@ -751,8 +698,6 @@ function catalog(ctx) {
 
 // ---- sheets for a planned showing and for a movie on a day ------------------------------------------
 
-const STATUS_LABEL = { planned: 'Planned', reserved: 'Reserved', cancelled: 'Cancelled' };
-
 function showingSheet(g, o) {
   openSheet(
     el('div', { className: 'row between' }, el('h2', { style: 'margin:0' }, 'Showing'),
@@ -763,16 +708,11 @@ function showingSheet(g, o) {
 function showingCard(g, o, now) {
   const past = isPast(o);
   const going = (o.attendees ?? []).slice().sort((a, b) => nameOf(g.members, a.user_id).localeCompare(nameOf(g.members, b.user_id)));
-  const state = past ? 'past' : going.some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
+  const state = past ? 'past' : 'planned';
 
   const goer = (a) => {
     const name = nameOf(g.members, a.user_id);
-    const label = past && a.status !== 'cancelled' ? (a.status === 'reserved' ? 'Watched' : 'Not reserved') : STATUS_LABEL[a.status];
-    const cls = past && a.status === 'reserved' ? 'watched' : past && a.status === 'planned' ? 'warn' : a.status;
     const acts = past ? [] : [
-      a.status === 'planned' && el('button', { className: 'btn sm ghost', type: 'button', title: 'I booked it in the AMC app', onclick: act(() => api.setAttendee(o.id, a.user_id, { status: 'reserved' }), `Marked reserved for ${name}`) }, 'Mark reserved'),
-      a.status === 'reserved' && el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.setAttendee(o.id, a.user_id, { status: 'cancelled' }), 'Reservation cancelled') }, 'Cancel'),
-      a.status === 'cancelled' && el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.setAttendee(o.id, a.user_id, { status: 'planned' }), 'Back in the plan') }, 'Restore'),
       el('button', { className: 'btn sm ghost', type: 'button', title: 'Seat', onclick: act(async () => {
         const seat = prompt(`Seat for ${name} (e.g. F12)`, a.seat ?? '');
         if (seat == null) return;
@@ -781,7 +721,7 @@ function showingCard(g, o, now) {
       el('button', { className: 'btn sm ghost danger', type: 'button', title: `Take ${name} off this showing`, onclick: act(() => api.removeAttendee(o.id, a.user_id), `${name} removed`) }, icon('x')),
     ];
     return el('div', { className: 'goer' }, avatar(name, true), el('span', { className: 'name' }, name),
-      el('span', { className: `pill ${cls}` }, label), past && a.seat && el('span', { className: 'muted' }, a.seat),
+      el('span', { className: `pill ${past ? 'watched' : 'planned'}` }, past ? 'Watched' : 'Going'), past && a.seat && el('span', { className: 'muted' }, a.seat),
       el('div', { className: 'acts' }, acts));
   };
 
@@ -828,7 +768,7 @@ async function movieDaySheet(m, day, g) {
   };
   const existing = g.outings.find((o) => o.show_date === day && !o.starts_at && o.movie_name === movie.name);
   if (existing) outing.id = existing.id;
-  const already = new Set((existing?.attendees ?? []).filter((a) => a.status !== 'cancelled').map((a) => a.user_id));
+  const already = new Set((existing?.attendees ?? []).map((a) => a.user_id));
   const who = future ? whoPicker(g, outing, already) : null;
   const save = el('button', { className: 'btn primary', type: 'button' }, icon('plus'), `Plan it for ${day === isoDay() ? 'today' : fmtDate(day, { weekday: 'long' })}`);
   save.onclick = async () => {
@@ -1012,7 +952,7 @@ async function moviePage(id) {
       el('div', { className: 'daysec-head' },
         el('h3', {}, fmtDate(d, { weekday: 'long', month: 'short', day: 'numeric' }), d === today && el('span', { className: 'pill planned' }, 'Today')),
         el('span', { className: 'muted' }, info ? `checked ${ago(info.checked)}` : 'not read yet'),
-        el('a', { className: 'btn sm ghost', href: plansLink('day', d) }, 'Plan this day')),
+        el('a', { className: 'btn sm ghost', href: `/?date=${d}` }, 'See that week')),
       list.length
         ? [el('div', { className: 'row' }, el('button', { className: 'btn sm primary', type: 'button', onclick: () => movieDaySheet(m, d, g) }, icon('plus'), `Plan it for ${d === today ? 'today' : weekdayOf(d)}`),
           el('span', { className: 'muted' }, 'or pick a time:')),
@@ -1060,7 +1000,7 @@ function showtimeGroups(showtimes, t, movie, g) {
     el('div', { className: 'times' }, list.map((s) => {
       const past = new Date(s.utc) <= Date.now();
       const o = goingTo.get(s.id);
-      const n = o ? (o.attendees ?? []).filter((a) => a.status !== 'cancelled').length : 0;
+      const n = o ? (o.attendees ?? []).length : 0;
       return el('button', {
         className: `time${s.soldOut ? ' sold' : ''}${n ? ' going' : ''}${past ? ' past' : ''}${s.alistExcluded ? ' excluded' : ''}`,
         type: 'button', disabled: past,
@@ -1081,7 +1021,7 @@ async function dayPage(date, theatreId = null) {
   if (!date) date = isDay(query().get('date')) ? query().get('date') : today;
   // a strip of the two weeks around this day, so empty or unread days show up too
   const days = weekDays(weekOf(date)).concat(weekDays(addWeeks(weekOf(date), 1))).filter((d) => d >= today);
-  const hrefFor = (d) => (t ? `/theatre/${t.id}${d === today ? '' : `?date=${d}`}` : plansLink('day', d));
+  const hrefFor = (d) => (t ? `/theatre/${t.id}${d === today ? '' : `?date=${d}`}` : `/?date=${d}`);
   const strip = el('div', { className: 'dates', role: 'group', ariaLabel: 'Date' }, days.map((d) => {
     const n = all.filter((s) => s.date === d).length;
     return el('a', { className: `date${n ? '' : ' none'}`, href: hrefFor(d), ariaCurrent: d === date ? 'date' : null },
@@ -1161,11 +1101,9 @@ function whoPicker(g, outing, alreadyGoing = new Set()) {
       return el('label', { className: box.disabled && !already ? 'blocked' : '' }, box, avatar(m.display_name, true), el('span', {}, m.display_name, m.user_id === me.id ? ' (you)' : ''), why);
     }));
   };
-  const seg = el('div', { className: 'seg', role: 'radiogroup', ariaLabel: 'Status' }, [['planned', 'Planning to go'], ['reserved', 'Already reserved']].map(([v, label]) =>
-    el('label', {}, el('input', { type: 'radio', name: 'status', value: v, checked: v === status, onchange: () => { status = v; draw(); } }), label)));
   draw();
   return {
-    node: el('div', { className: 'stack', style: 'display:grid;gap:10px' }, list, seg),
+    node: el('div', { className: 'stack', style: 'display:grid;gap:10px' }, list),
     picked: () => [...boxes].filter(([, b]) => b.checked && !b.disabled).map(([id]) => id),
     status: () => status,
   };
@@ -1180,7 +1118,7 @@ function showtimeSheet(s, t, movie, g) {
   };
   const existing = g.outings.find((o) => Number(o.showtime_id) === s.id);
   if (existing) outing.id = existing.id;
-  const already = new Set((existing?.attendees ?? []).filter((a) => a.status !== 'cancelled').map((a) => a.user_id));
+  const already = new Set((existing?.attendees ?? []).map((a) => a.user_id));
   const who = whoPicker(g, outing, already);
 
   const excluded = s.alistExcluded && el('section', { className: 'panel notice warnbox' }, icon('warn'),
@@ -1217,7 +1155,7 @@ function showtimeSheet(s, t, movie, g) {
     el('section', {}, el('h3', {}, "Who's going"), who.node),
     el('div', { className: 'row' }, save,
       el('a', { className: 'btn ghost', href: s.purchaseUrl, target: '_blank', rel: 'noopener' }, 'Reserve on AMC', icon('ext'))),
-    el('p', { className: 'muted' }, 'Adding here plans it for the group. Book the actual seats in the AMC app (your entourage can book for each other there), then mark it reserved.'));
+    el('p', { className: 'muted' }, 'Adding here plans it for the group. Book the seats in the AMC app (your entourage can book for each other there).'));
 }
 
 // ---- adding a showing by hand (any day, any theatre) ----------------------------------------------
@@ -1315,7 +1253,7 @@ async function historyPage() {
   const g = await groupData();
   const now = Date.now();
   const past = g.outings.filter(isPast).sort(byShowing).reverse();
-  const watched = (id) => g.of(id).filter((a) => a.status !== 'cancelled' && isPast(a));
+  const watched = (id) => g.of(id).filter(isPast);
   const year = String(new Date().getFullYear());
   view(heading('Everything so far', 'History'),
     el('div', { className: 'tiles' }, g.members.flatMap((m) => [
@@ -1327,7 +1265,7 @@ async function historyPage() {
       { label: 'Movie', val: (o) => o.movie_name, cell: (o) => (o.movie_id ? link(`/movie/${o.movie_id}`, o.movie_name) : o.movie_name), num: false },
       { label: 'Theatre', val: (o) => o.theatre_name, num: false },
       { label: 'Format', val: (o) => o.format ?? '', cell: (o) => (o.format ? fmtBadge(o.format) : '–'), num: false },
-      { label: 'Who', val: (o) => (o.attendees ?? []).filter((a) => a.status !== 'cancelled').map((a) => nameOf(g.members, a.user_id)).join(', '), num: false },
+      { label: 'Who', val: (o) => (o.attendees ?? []).map((a) => nameOf(g.members, a.user_id)).join(', '), num: false },
     ], past, { sortCol: 0 }));
 }
 
@@ -1345,10 +1283,10 @@ function rulesPage() {
       el('p', { className: 'muted', style: 'margin-top:16px' }, 'From AMC\'s ', el('a', { href: TERMS_URL, target: '_blank', rel: 'noopener' }, 'A-List terms and conditions'), ', checked November 2026.')),
     panel('How the planner uses them',
       el('ul', { className: 'rules' },
-        el('li', {}, 'Every showing someone plans or reserves takes one of their 4 for that week. Adding a fifth is refused, for planned and reserved alike.'),
-        el('li', {}, 'Only showings marked reserved count toward the 4-at-a-time limit. You can still plan further ahead; it tells you to reserve once a current reservation has been used.'),
-        el('li', {}, 'Overlapping showings for the same person are refused (a showing lasts its runtime).'),
-        el('li', {}, 'Cancelling a reservation frees the admission again. The database checks every rule, so nothing can slip past from two phones at once.'))));
+        el('li', {}, 'Every showing someone is on takes one of their 4 for that A-List week (by its date). Adding a fifth is refused.'),
+        el('li', {}, 'Overlapping showings for the same person are refused, when both have a time (a showing lasts its runtime).'),
+        el('li', {}, "The planner doesn't track bookings, so the 4-at-a-time reservation limit is up to the AMC app."),
+        el('li', {}, 'Taking someone off a showing frees the admission again. The database checks every rule, so nothing can slip past from two phones at once.'))));
 }
 
 render();

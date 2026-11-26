@@ -102,19 +102,19 @@ test('4 movies per A-List week, then the fifth is refused', async () => {
   await assert.rejects(plan(ANN, showing(at(3, '18:00')), [ANN]), /already has 4 movies/);
   // 6:00am Friday is a new week
   await plan(ANN, showing(at(7, '06:00'), 60), [ANN]);
-  // cancelling frees the admission
+  // taking her off one frees the admission
   const { rows } = await db.query(`select o.id from amc.outings o join amc.attendees a on a.outing_id = o.id
     where a.user_id = $1 and o.starts_at = $2`, [ANN, at(0, '10:00')]);
-  await as(ANN, `update amc.attendees set status = 'cancelled' where outing_id = $1 and user_id = $2`, [rows[0].id, ANN]);
+  await as(ANN, 'delete from amc.attendees where outing_id = $1 and user_id = $2', [rows[0].id, ANN]);
   await plan(ANN, showing(at(3, '18:00')), [ANN]);
 });
 
-test('no more than 4 reservations held at once, across weeks', async () => {
-  for (let w = 0; w < 4; w++) await plan(BOB, showing(at(14 + w * 7, '20:00')), [BOB], 'reserved');
-  await assert.rejects(plan(BOB, showing(at(14 + 4 * 7, '20:00')), [BOB], 'reserved'), /4 upcoming reservations/);
-  // planning beyond it is allowed, but marking it reserved is not
-  const id = await plan(BOB, showing(at(14 + 5 * 7, '20:00')), [BOB], 'planned');
-  await assert.rejects(as(BOB, `update amc.attendees set status = 'reserved' where outing_id = $1`, [id]), /4 upcoming reservations/);
+test('one kind of entry: no cap on planning weeks ahead, and no reserved or cancelled', async () => {
+  for (let w = 0; w < 6; w++) await plan(BOB, showing(at(14 + w * 7, '20:00')), [BOB], 'reserved'); // old pages still send a status
+  const statuses = (await db.query(`select distinct status from amc.attendees where user_id = $1`, [BOB])).rows.map((r) => r.status);
+  assert.deepEqual(statuses, ['planned']);
+  const any = (await db.query(`select outing_id from amc.attendees where user_id = $1 limit 1`, [BOB])).rows[0].outing_id;
+  await assert.rejects(as(BOB, `update amc.attendees set status = 'reserved' where outing_id = $1 and user_id = $2`, [any, BOB]), /attendees_status_check/);
 });
 
 test('overlapping showtimes are refused; back to back is fine', async () => {
@@ -124,7 +124,7 @@ test('overlapping showtimes are refused; back to back is fine', async () => {
 });
 
 test('one call plans for both, or for neither', async () => {
-  // Ann already has 4 in week 0 (+3 after the cancel); fill her week 1 so a joint plan fails for her
+  // Ann already has 4 in week 0 (+1 in week 1); fill her week 1 so a joint plan fails for her
   const week1 = [[7, '12:00'], [8, '12:00'], [9, '12:00']];
   for (const [d, t] of week1) await plan(ANN, showing(at(d, t)), [ANN]);
   const before = (await db.query('select count(*)::int as c from amc.attendees')).rows[0].c;
@@ -149,7 +149,7 @@ test('members can plan for each other but only for members, and wants are your o
 test('JS rule check agrees with the database', () => {
   const adm = [0, 1, 2].map((i) => ({ outing_id: `o${i}`, status: 'planned', starts_at: at(i, '10:00'), ends_at: at(i, '12:00'), tz: TZ }));
   assert.equal(canAttend(adm, { starts_at: at(3, '10:00'), ends_at: at(3, '12:00'), tz: TZ }).ok, true);
-  adm.push({ outing_id: 'o3', status: 'reserved', starts_at: at(3, '10:00'), ends_at: at(3, '12:00'), tz: TZ });
+  adm.push({ outing_id: 'o3', status: 'planned', starts_at: at(3, '10:00'), ends_at: at(3, '12:00'), tz: TZ });
   const r = canAttend(adm, { starts_at: at(4, '10:00'), ends_at: at(4, '12:00'), tz: TZ });
   assert.equal(r.ok, false);
   assert.match(r.problems[0], /4 movies/);

@@ -4,7 +4,6 @@
 //
 //   * up to 4 showtimes per A-List week, which runs Friday 6:00 a.m. to the next Friday 5:59 a.m.
 //     (theatre local time). Used, planned and no-show admissions all count;
-//   * no more than 4 pending reservations at any one time, whatever week they fall in;
 //   * showtimes on the same day are fine as long as they don't overlap.
 
 export const PER_WEEK = 4;
@@ -93,14 +92,12 @@ export function standing(admissions, now = Date.now(), tz = localTz()) {
     byWeek,
     usedThisWeek: byWeek[thisWeek] ?? 0,
     leftThisWeek: Math.max(0, PER_WEEK - (byWeek[thisWeek] ?? 0)),
-    reservedUpcoming: upcoming.filter((a) => a.status === 'reserved').length,
-    plannedUpcoming: upcoming.filter((a) => a.status === 'planned').length,
+    upcoming: upcoming.length,
   };
 }
 
 /**
- * Can this person go to `outing` ({ id?, show_date?, starts_at?, ends_at?, tz })? `status` is what they'd hold
- * ('planned' or 'reserved'). Returns { ok, problems: string[], notes: string[] }: problems are rule
+ * Can this person go to `outing` ({ id?, show_date?, starts_at?, ends_at?, tz })? Returns { ok, problems: string[], notes: string[] }: problems are rule
  * breaks the database will refuse; notes are things worth knowing that don't block a plan.
  */
 export function canAttend(admissions, outing, status = 'planned', now = Date.now()) {
@@ -111,12 +108,6 @@ export function canAttend(admissions, outing, status = 'planned', now = Date.now
   if (sameWeek >= PER_WEEK) problems.push(`Already has ${PER_WEEK} movies that A-List week`);
   const clash = others.find((a) => overlaps(a, outing));
   if (clash) problems.push(`Overlaps ${clash.movie_name ?? 'another showing'}`);
-  const future = isUpcoming(outing, now);
-  const reserved = others.filter((a) => a.status === 'reserved' && isUpcoming(a, now)).length;
-  if (future && reserved >= PENDING) {
-    if (status === 'reserved') problems.push(`Already holds ${PENDING} upcoming reservations`);
-    else notes.push(`Holds ${PENDING} reservations now: reserve this once one has been used`);
-  }
   if (!problems.length && sameWeek === PER_WEEK - 1) notes.push('Uses the last admission of that week');
   return { ok: !problems.length, problems, notes };
 }

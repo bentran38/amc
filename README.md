@@ -4,11 +4,11 @@ Plan which movies you and your entourage spend your AMC Stubs A-List admissions 
 Static site (no framework), same Supabase project and shared login as [durpeesquid](https://github.com/bentran38/durpeesquid):
 `site/session.js` imports `https://www.durpeesquid.com/auth.js`, so the cookie session and the colour theme carry over.
 
-- **Plan** (`/?view=day|week|month|year&date=`): a calendar beside a scrolling catalog of movie posters (along the
+- **Plan** (`/?view=week|month|year&date=`): a calendar beside a scrolling catalog of movie posters (along the
   bottom on a phone), with each person's 4 admissions for the week on top. Week is the A-List week (Fri → Thu) as a
-  vertical bar of days; month has a row per A-List week; year shows twelve small months; day is a timeline with
-  everything on that day below it. Click a showing for its details: mark it reserved, cancel, note a seat, add the
-  other person, open AMC's seat map.
+  vertical bar of days (click a day's date for what's on it); month has a row per A-List week; year shows the A-List
+  year, November to October, starting November 2026. A showing is one kind of entry: someone is going. Click it to
+  note a seat, set a time, add the other person, take someone off, or open AMC's seat map.
 - **Drag and drop** (mouse, or press-and-hold on a phone; the page scrolls at the screen edges): drag a poster onto a
   day to plan it there. While dragging, days turn green (AMC lists it that day), blue (expected from its release date)
   or amber (not listed; you can still plan it, say when you already have tickets). Drag a face onto a showing to add
