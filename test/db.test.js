@@ -200,21 +200,6 @@ test('members read scraped data but cannot write it; others see nothing; ingest 
   assert.equal((await as(BOB, 'select scrape from amc.theatres where id = 366')).rows[0].scrape, true);
 });
 
-test('members pencil movies in for a day, move and remove them; others see nothing', async () => {
-  const day = base, next = at(1, '12:00').slice(0, 10);
-  await as(ANN, `insert into amc.picks (day, movie_name) values ($1, 'Pencilled Movie')`, [day]);
-  await assert.rejects(as(BOB, `insert into amc.picks (day, movie_name) values ($1, 'Pencilled Movie')`, [day]), /duplicate key/);
-  const seen = await as(BOB, 'select id, created_by from amc.picks');
-  assert.equal(seen.rows.length, 1);
-  assert.equal(seen.rows[0].created_by, ANN);
-  await as(BOB, 'update amc.picks set day = $1 where id = $2', [next, seen.rows[0].id]);
-  assert.equal((await as(EVE, 'select * from amc.picks')).rows.length, 0);
-  await assert.rejects(as(EVE, `insert into amc.picks (day, movie_name) values ($1, 'Nope')`, [day]), /row-level security/);
-  await as(EVE, 'delete from amc.picks'); // silently matches nothing
-  assert.equal((await as(ANN, 'select * from amc.picks where day = $1', [next])).rows.length, 1);
-  await as(ANN, 'delete from amc.picks');
-  assert.equal((await as(BOB, 'select * from amc.picks')).rows.length, 0);
-});
 
 // ---- planning by day ---------------------------------------------------------------------------
 
@@ -254,9 +239,9 @@ test('JS rules count a showing without a time by its day', () => {
   assert.equal(canAttend(adm, { show_date: dayOf(91), tz: TZ }).ok, true);
 });
 
-test('the scraper is told which planned or pencilled days to read, and ingest records the days it read', async () => {
+test('the scraper is told which planned days to read, and ingest records the days it read', async () => {
   const want = day(5), other = day(6);
-  await as(ANN, `insert into amc.picks (day, movie_name) values ($1, 'Wanted Movie')`, [want]);
+  const planned = await plan(ANN, { movie_name: 'Wanted Movie', theatre_name: 'AMC Columbia 14', theatre_id: 349, show_date: want, tz: TZ }, [ANN]);
   await db.exec('set role service_role');
   const wants = async () => (await db.query('select theatre_id, day::text d from amc.scrape_wants()')).rows;
   try {
@@ -271,7 +256,8 @@ test('the scraper is told which planned or pencilled days to read, and ingest re
   } finally { await db.exec('reset role'); }
   await assert.rejects(as(ANN, 'select * from amc.scrape_wants()'), /permission denied/);
   assert.equal((await as(EVE, 'select * from amc.days_read')).rows.length, 0);
-  await as(ANN, 'delete from amc.picks');
+  await as(ANN, 'delete from amc.outings where id = $1', [planned]);
+  assert.equal((await db.query("select to_regclass('amc.picks') as t")).rows[0].t, null, 'pencil marks are gone');
 });
 
 test('ingest stores release dates from the movies page without needing a theatre', async () => {

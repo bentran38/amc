@@ -87,8 +87,6 @@ const tables = {
   scrape_runs: RUNS,
   // the days the scraper has read: the ones with showtimes, plus day 9 read and found empty
   days_read: [...new Set(SHOWTIMES.map((x) => x.show_date)), dayPlus(9)].map((d) => ({ theatre_id: 349, show_date: d, read_at: new Date(now - 5 * 36e5).toISOString(), showtimes: 0 })),
-  // Echoes of Juno pencilled in for a day that hasn't been read yet (so it carries a warning)
-  picks: [{ id: 'p0', day: dayPlus(4), movie_id: MOVIES[8].id, movie_name: MOVIES[8].name, movie_slug: MOVIES[8].slug, poster_url: null, created_at: '' }],
   outings: [],
   attendees: [],
   wants: [
@@ -156,9 +154,7 @@ class Query {
     if (this.op === 'upsert' || this.op === 'insert') {
       for (const row of this.rows) {
         const r = this.table === 'wants' ? { user_id: 'me', created_at: new Date().toISOString(), ...row } : row;
-        const key = this.table === 'wants' ? (x) => x.user_id === r.user_id && x.movie_id === r.movie_id
-          : this.table === 'picks' ? (x) => x.day === r.day && x.movie_name === r.movie_name : (x) => x.id === r.id;
-        if (this.table === 'picks') { if (t.some(key)) continue; r.id = `p${++uid}`; }
+        const key = this.table === 'wants' ? (x) => x.user_id === r.user_id && x.movie_id === r.movie_id : (x) => x.id === r.id;
         const old = t.find(key);
         if (old) Object.assign(old, r); else t.push(r);
       }

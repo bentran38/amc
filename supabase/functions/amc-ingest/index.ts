@@ -34,7 +34,7 @@ Deno.serve(async (req) => {
     const { data, error } = await db.schema('amc').from('theatres')
       .select('id, slug, market, tz').eq('scrape', true).not('slug', 'is', null).not('market', 'is', null);
     if (error) return json(500, { error: error.message });
-    // days with plans or pencil marks that haven't been read lately: the scraper reads these first
+    // days with something planned that haven't been read lately: the scraper reads these first
     const wants = await db.schema('amc').rpc('scrape_wants');
     if (wants.error) return json(500, { error: wants.error.message });
     const theatres = data.map((t) => ({ ...t, want_days: (wants.data ?? []).filter((w) => w.theatre_id === t.id).map((w) => w.day) }));

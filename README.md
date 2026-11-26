@@ -10,16 +10,14 @@ Static site (no framework), same Supabase project and shared login as [durpeesqu
   everything on that day below it. Click a showing for its details: mark it reserved, cancel, note a seat, add the
   other person, open AMC's seat map.
 - **Drag and drop** (mouse, or press-and-hold on a phone; the page scrolls at the screen edges): drag a poster onto a
-  day. While dragging, days where it has showtimes turn green ("pick a time") and the rest amber. Dropping on green
-  opens its times; dropping on amber pencils it in (`amc.picks`) with a "!" marker ("No showtimes yet" or "Not showing
-  this day") that turns into a ✓ once that day has times for it, and goes away when a real showing is planned. Drag a
-  pencilled movie to another day or onto the bar at the bottom to remove it; drag a face onto a showing to add that
-  person. Everything also has a button.
+  day to plan it there. While dragging, days turn green (AMC lists it that day), blue (expected from its release date)
+  or amber (not listed; you can still plan it, say when you already have tickets). Drag a face onto a showing to add
+  that person, or someone off a showing onto the bar at the bottom to remove them. Everything also has a button.
 - **On a phone** (up to 760px wide) the site has its own layout: a tab bar at the bottom, sheets that slide up (swipe
   down to close), and a tap-first plan. A period switcher (‹ This week ›, Day / Week / Month / Year), each person's
   admissions as a scrolling row, Fri → Thu day chips with dots, and an agenda of full-width cards. Each day's **Add**
-  lists what's showing that day with its times (tap one to plan it) and lets you pencil in the rest; a pencilled
-  movie's sheet moves it to another day or removes it. Month is a tappable grid with the chosen day below.
+  lists what's showing, what's expected and everything else, each with a Plan button. Month is a tappable grid with the
+  chosen day below.
 - **Movies** (`/movies?week=<friday>`): what's showing in all stored days or in one A-List week, with which days and
   how many times. Star the ones you want to see.
 - **Movie** (`/movie/<id>?week=<friday>`): every day of the week under its own dated heading (a jump bar on top), times
@@ -70,10 +68,10 @@ the admission. A week is measured in the theatre's time zone.
   movies (name, rating, runtime, poster) and showtimes (id, UTC start, sold-out status, format group and its tags) out
   of that. Cloudflare refuses headless Chrome and plain HTTP, and lets a visible Chrome window load **one page** before
   refusing the next (seat pages always). So each run reads one page per theatre and stops; nothing tries to get
-  around the block. Which day it reads: today's page once a day; then days with a plan or pencil mark; then every
+  around the block. Which day it reads: today's page once a day; then days with something planned; then every
   date AMC's date picker lists, as far out as it goes (daily for the coming week, every other day the week after,
   about every five days beyond, dates never read before re-reads), tracked in `scraper/state.json`. If AMC answers a
-  date it has no schedule for with another day, showtimes not on the asked-for day are left out. Days the group has a plan or a pencil mark on are read
+  date it has no schedule for with another day, showtimes not on the asked-for day are left out. Days the group has something planned on are read
   first (`amc.scrape_wants()`, passed to the scraper by the `targets` action), and every read day is noted in
   `amc.days_read`, even one with nothing on. A blocked run is logged and the site shows it.
 - **Ingest**: `scraper/scrape.js` sends the result to the `amc-ingest` Edge Function with the `x-ingest-token` header

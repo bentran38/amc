@@ -61,16 +61,6 @@ export const theatres = async () => ok(await db.from('theatres').select('*').ord
 /** Switch the scraper on or off for a theatre. */
 export const setScrape = async (id, on) => ok(await db.from('theatres').update({ scrape: on }).eq('id', id));
 
-// ---- pencilled-in movies (a day, no showtime yet) ---------------------------------------------------
-
-export const picks = async () => ok(await db.from('picks').select('*').order('day'));
-export const addPick = async (p) =>
-  ok(await db.from('picks').upsert(p, { onConflict: 'day,movie_name', ignoreDuplicates: true }));
-export const movePick = async (id, day) => ok(await db.from('picks').update({ day }).eq('id', id));
-export const removePick = async (id) => ok(await db.from('picks').delete().eq('id', id));
-/** Once a real showing is planned, its pencil mark for that day goes. */
-export const clearPick = async (day, movieName) => ok(await db.from('picks').delete().eq('day', day).eq('movie_name', movieName));
-
 // ---- wants ----------------------------------------------------------------------------------
 
 export const wants = async () => ok(await db.from('wants').select('*').order('created_at'));

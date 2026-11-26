@@ -15,7 +15,7 @@
 // per theatre and stops. If Cloudflare blocks it, the run is recorded as failed and the planner shows the data as
 // stale; nothing tries to get around the block.
 //
-// Which day: today's page once a day (first run after midnight); then any day the group has a plan or a pencil mark on
+// Which day: today's page once a day (first run after midnight); then any day the group has something planned on
 // that hasn't been read lately (the planner tells us, nearest first); otherwise the most overdue of every date AMC lists
 // in its date picker, as far out as it goes (see dueHours). What matters to the planner is which days each movie is on, so every
 // read day counts, even one with nothing showing. What was read when is kept in state.json next to this file.
@@ -66,7 +66,7 @@ function pickDay(t, st) {
   const hoursAgo = (d) => (read[d] ? (Date.now() - Date.parse(read[d])) / 36e5 : Infinity);
   // 1. today, once a day
   if (!read[today] || localDay(tz, 0, new Date(read[today])) !== today) return today;
-  // 2. days the group has a plan or a pencil mark on, nearest first
+  // 2. days the group has something planned on, nearest first
   const wanted = (t.want_days ?? []).filter((d) => d > today && hoursAgo(d) >= 20).sort();
   if (wanted.length) return wanted[0];
   // 3. every other date AMC lists (its date picker), as far out as it goes: the most overdue for its distance.

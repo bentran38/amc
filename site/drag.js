@@ -5,7 +5,7 @@
 //   draggable(node, { type, data, ghost? })   ghost: a node to carry around (default: a copy of `node`)
 //   dropzone(node, { accepts, onDrop(data, type), hint?(data, type) })
 //                                             hint returns ['good' | 'warn', label] to colour the zone while a
-//                                             matching drag is going (e.g. green "Pick a time", amber "Pencil in")
+//                                             matching drag is going (e.g. green "Showing that day", amber "Not posted yet")
 //   dock({ accepts, label, iconNode, onDrop }) a target pinned to the bottom of the screen while a matching drag is
 //                                             going (e.g. "Drop to remove"); returns a function that removes it
 

@@ -208,8 +208,8 @@ function freshBanner(f) {
 
 // ---- plan: a calendar (day / week / month / year) with the movie catalog beside it -------------------
 // The calendar is on the left, the catalog of posters on the right (along the bottom on a phone). Drag a poster
-// onto a day: if the movie has showtimes that day you pick one; if not (not showing, or the day isn't read yet) it
-// is pencilled in with a warning until a real showing is planned.
+// onto a day to plan it for that day: green if AMC lists it that day, blue if it's expected from its release date,
+// amber if neither (you can still plan it, say when you already have tickets).
 
 const MODES = [['day', 'Day'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year']];
 let catalogTab = 'view'; // 'view': showing in the period on screen; 'wish': wishlist; 'all'
@@ -237,14 +237,13 @@ async function planPage() {
   const mode = MODES.some(([m]) => m === q.get('view')) ? q.get('view') : 'week';
   const today = isoDay();
   const date = isDay(q.get('date')) ? q.get('date') : today;
-  const [g, wants, movies, shows, dayInfo, theatres, picks] = await Promise.all([
-    groupData(), api.wants(), api.movies(), api.showtimes(), api.days(), api.theatres(), api.picks()]);
+  const [g, wants, movies, shows, dayInfo, theatres] = await Promise.all([
+    groupData(), api.wants(), api.movies(), api.showtimes(), api.days(), api.theatres()]);
   const ctx = {
-    g, wants, movies, shows, dayInfo, theatres, picks, today, date, mode,
+    g, wants, movies, shows, dayInfo, theatres, today, date, mode,
     movieById: new Map(movies.map((m) => [m.id, m])),
     showsByDay: groupBy(shows, (s) => s.date),
     plansByDay: groupBy(g.outings.slice().sort(byShowing), (o) => o.show_date),
-    picksByDay: groupBy(picks, (p) => p.day),
     opensByDay: groupBy(movies.filter((m) => m.release && m.kind !== 'event'), (m) => m.release),
   };
   ctx.range = mode === 'day' ? [date] : mode === 'week' ? weekDays(weekOf(date)) : mode === 'month' ? monthDays(date) : null;
@@ -254,11 +253,6 @@ async function planPage() {
     accepts: 'attendee', kind: 'danger', label: 'Drop here to take them off the showing', iconNode: () => icon('x'),
     onDrop: (d) => act(() => api.removeAttendee(d.outingId, d.userId), `${d.name} taken off ${d.movie}`)(),
   });
-  dock({
-    accepts: 'pick', kind: 'danger', label: 'Drop here to remove it', iconNode: () => icon('x'),
-    onDrop: (p) => act(() => api.removePick(p.id), `${p.movie_name} taken off ${fmtDate(p.day)}`)(),
-  });
-
   const body = mode === 'day' ? dayView(ctx) : mode === 'week' ? weekView(ctx) : mode === 'month' ? monthView(ctx) : yearView(ctx);
   view(
     planBar(ctx),
@@ -327,32 +321,18 @@ function peopleStrip({ g, date, mode, today }) {
 
 const timesFor = (ctx, movieId, day) => (ctx.showsByDay.get(day) ?? []).filter((s) => s.movieId === movieId);
 
-/** Make a day a drop target: green when the movie has showtimes that day, amber when it doesn't. */
+/** Make a day a drop target: green when AMC lists the movie that day, blue when it's expected, amber otherwise. */
 function dayDrop(ctx, node, day) {
   if (day < ctx.today) return node;
   return dropzone(node, {
-    accepts: ['movie', 'pick'],
-    hint: (data, type) => {
-      const st = movieDayStatus(ctx, { id: type === 'pick' ? data.movie_id : data.id, ...(type === 'pick' ? {} : data) }, day);
+    accepts: 'movie',
+    hint: (m) => {
+      const st = movieDayStatus(ctx, m, day);
       return st.s === 'showing' ? ['good', 'Showing that day · plan it'] : st.s === 'expected' ? ['expect', 'Expected that day · plan it']
-        : ['warn', st.s === 'not' ? 'Not showing · pencil in' : 'Not posted yet · pencil in'];
+        : ['warn', st.s === 'not' ? 'Not showing · plan anyway' : 'Not posted yet · plan anyway'];
     },
-    onDrop: (data, type) => (type === 'pick' ? movePick(ctx, data, day) : dropMovie(ctx, data, day)),
+    onDrop: (m) => movieDaySheet(m, day, ctx.g),
   });
-}
-
-function dropMovie(ctx, m, day) {
-  if (['showing', 'expected'].includes(movieDayStatus(ctx, m, day).s)) return movieDaySheet(m, day, ctx.g);
-  if ((ctx.picksByDay.get(day) ?? []).some((p) => p.movie_name === m.name)) return toast(`${m.name} is already pencilled in for ${fmtDate(day)}`);
-  const why = movieDayStatus(ctx, m, day).s === 'not' ? `isn't showing on ${fmtDate(day)}` : `isn't posted for ${fmtDate(day)} yet`;
-  return act(() => api.addPick({ day, movie_id: m.id ?? null, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }),
-    `${m.name} ${why}, so it's pencilled in with a warning`)();
-}
-
-function movePick(ctx, p, day) {
-  if (p.day === day) return;
-  if ((ctx.picksByDay.get(day) ?? []).some((x) => x.movie_name === p.movie_name)) return toast(`${p.movie_name} is already pencilled in for ${fmtDate(day)}`);
-  return act(() => api.movePick(p.id, day), `${p.movie_name} moved to ${fmtDate(day)}`)();
 }
 
 /** A planned showing: poster, time, title, who's going. Click for the details; drop a face on it to add them. */
@@ -382,32 +362,6 @@ function planChip(ctx, o, size = 'md') {
   return chip;
 }
 
-function pickStatus(ctx, p) {
-  const st = movieDayStatus(ctx, { id: p.movie_id }, p.day);
-  if (st.s === 'showing') return { cls: 'ready', note: 'Showing that day · tap to plan' };
-  if (st.s === 'expected') return { cls: 'ready', note: 'Expected that day · tap to plan' };
-  return { cls: 'warn', note: st.s === 'not' ? 'Not showing this day' : 'Not posted yet' };
-}
-
-/** A pencilled-in movie, with a warning marker until it has showtimes that day. Drag it to another day or off. */
-function pickChip(ctx, p, size = 'md') {
-  const st = pickStatus(ctx, p);
-  const m = ctx.movieById.get(p.movie_id) ?? { id: p.movie_id, name: p.movie_name, slug: p.movie_slug, poster: p.poster_url };
-  const mark = el('span', { className: `pick-mark ${st.cls}`, title: st.note, ariaLabel: st.note }, st.cls === 'warn' ? '!' : '✓');
-  const chip = el('button', {
-    className: `pchipx pick ${st.cls} ${size}`, type: 'button', title: `${p.movie_name} · pencilled in · ${st.note}`,
-    onclick: () => movieDaySheet(m, p.day, ctx.g, p),
-  },
-  size !== 'sm' ? el('span', { className: 'pp' }, poster(p.poster_url ?? m.poster, p.movie_name), mark) : mark,
-  el('span', { className: 'pl-text' },
-    size !== 'sm' && el('span', { className: 'pl-time' }, st.note),
-    el('span', { className: 'pl-title' }, p.movie_name)));
-  if (p.day >= ctx.today) {
-    draggable(chip, { type: 'pick', data: p, ghost: () => el('span', { className: 'poster-ghost' }, poster(p.poster_url ?? m.poster, p.movie_name)) });
-  }
-  return chip;
-}
-
 /** The films opening that day, as small buttons that open the plan sheet. */
 function opensRow(ctx, d) {
   const list = (ctx.opensByDay.get(d) ?? []).sort((a, b) => a.name.localeCompare(b.name));
@@ -417,7 +371,7 @@ function opensRow(ctx, d) {
 }
 
 function dayItems(ctx, d, size) {
-  return [...(ctx.plansByDay.get(d) ?? []).map((o) => planChip(ctx, o, size)), ...(ctx.picksByDay.get(d) ?? []).map((p) => pickChip(ctx, p, size))];
+  return (ctx.plansByDay.get(d) ?? []).map((o) => planChip(ctx, o, size));
 }
 
 /** Week: the A-List week (Fri → Thu) as a vertical bar of days. */
@@ -478,12 +432,11 @@ function yearView(ctx) {
     const grid = weeks.map((w) => el('div', { className: 'ym-week' }, weekDays(w).map((d) => {
       if (d.slice(0, 7) !== first.slice(0, 7)) return el('span', { className: 'yd out' });
       const plans = ctx.plansByDay.get(d) ?? [];
-      const picks = ctx.picksByDay.get(d) ?? [];
       count += plans.length;
       const state = plans.length
         ? (plans.every(isPast) ? 'past' : plans.some((o) => (o.attendees ?? []).some((a) => a.status === 'reserved')) ? 'reserved' : 'planned')
-        : picks.length ? 'pick' : '';
-      const tip = [...plans.map((o) => `${o.movie_name} ${hasTime(o) ? fmtTime(o.starts_at, o.tz) : '(any time)'}`), ...picks.map((p) => `${p.movie_name} (pencilled in)`)].join(', ');
+        : '';
+      const tip = plans.map((o) => `${o.movie_name} ${hasTime(o) ? fmtTime(o.starts_at, o.tz) : '(any time)'}`).join(', ');
       return el('a', { className: `yd ${state}${d === ctx.today ? ' today' : ''}`, href: plansLink('day', d), title: tip ? `${fmtDate(d)}: ${tip}` : fmtDate(d) }, Number(d.slice(8)));
     })));
     return el('section', { className: 'ymonth', style: `--i:${i}` },
@@ -494,11 +447,10 @@ function yearView(ctx) {
   }));
 }
 
-/** Day: a timeline of what's planned, pencilled-in movies, then everything on that day. */
+/** Day: a timeline of what's planned (showings without a time above it), then everything on that day. */
 function dayView(ctx) {
   const d = ctx.date;
   const plans = ctx.plansByDay.get(d) ?? [];
-  const picks = ctx.picksByDay.get(d) ?? [];
   const info = ctx.dayInfo.get(d);
   const START = 10, END = 26, H = 46; // 10 AM to 2 AM, px per hour
   const hourOf = (iso) => { const t = new Date(iso); const h = t.getHours(); return (h < 5 ? h + 24 : h) + t.getMinutes() / 60; };
@@ -528,8 +480,7 @@ function dayView(ctx) {
     el('div', { className: 'dv-head' },
       el('span', { className: 'muted' }, d < ctx.today ? 'Past day' : info ? `${info.count} showtimes stored · checked ${ago(info.checked)}` : "Showtimes for this day haven't been read yet"),
       d >= ctx.today && el('span', { className: 'muted' }, ' · drop a movie anywhere here')),
-    untimed.length > 0 && el('div', { className: 'dv-picks' }, el('span', { className: 'muted' }, 'Any time'), untimed.map((o) => planChip(ctx, o, 'md'))),
-    picks.length > 0 && el('div', { className: 'dv-picks' }, el('span', { className: 'muted' }, 'Pencilled in'), picks.map((p) => pickChip(ctx, p, 'md'))),
+    untimed.length > 0 && el('div', { className: 'dv-row' }, el('span', { className: 'muted' }, 'Any time'), untimed.map((o) => planChip(ctx, o, 'md'))),
     timeline), d);
 
   return [panel_, onThatDay(ctx, d)];
@@ -557,8 +508,8 @@ function onThatDay(ctx, d) {
 // ---- the plan on a phone ----------------------------------------------------------------------------
 // Same data and the same things you can do, laid out for a thumb: a period switcher, people as a scrolling row,
 // a Fri → Thu strip of day chips, and an agenda of full-width cards. Instead of dragging posters, each day has an
-// "Add" button that lists what's showing that day with its times (tap one to plan it) and lets you pencil in the
-// rest. Pencilled-in movies are moved or removed from their sheet; people are added from a showing's sheet.
+// "Add" button that lists what's showing or expected that day (tap Plan) and everything else (plan it anyway);
+// people are added from a showing's sheet.
 
 function phonePlan(ctx) {
   const { mode, date, today } = ctx;
@@ -598,7 +549,6 @@ function phonePeople({ g, date, mode, today }) {
 
 const dotsFor = (ctx, d) => [
   ...(ctx.plansByDay.get(d) ?? []).map((o) => (isPast(o) ? 'past' : (o.attendees ?? []).some((a) => a.status === 'reserved') ? 'reserved' : 'planned')),
-  ...(ctx.picksByDay.get(d) ?? []).map(() => 'pick'),
 ].slice(0, 4).map((c) => el('i', { className: c }));
 
 function phoneWeek(ctx) {
@@ -634,11 +584,10 @@ function phoneMonth(ctx) {
   ];
 }
 
-/** One day of the agenda: what's planned, what's pencilled in, and an Add button. */
+/** One day of the agenda: what's planned, what opens, and an Add button. */
 function phoneDay(ctx, d) {
   const past = d < ctx.today;
   const plans = ctx.plansByDay.get(d) ?? [];
-  const picks = ctx.picksByDay.get(d) ?? [];
   const info = ctx.dayInfo.get(d);
   return el('section', { className: `m-agenda${past ? ' past' : ''}${d === ctx.today ? ' today' : ''}`, id: `d-${d}` },
     el('div', { className: 'm-agenda-head' },
@@ -646,9 +595,8 @@ function phoneDay(ctx, d) {
       !past && el('span', { className: 'muted' }, info ? `${info.count} times` : 'not read yet'),
       !past && el('button', { className: 'm-add', type: 'button', onclick: () => addSheet(ctx, d) }, icon('plus'), 'Add')),
     plans.map((o) => phonePlanCard(ctx, o)),
-    picks.map((p) => phonePickCard(ctx, p)),
     !past && opensRow(ctx, d),
-    !plans.length && !picks.length && (past
+    !plans.length && (past
       ? el('p', { className: 'm-none' }, 'Nothing')
       : el('button', { className: 'm-empty', type: 'button', onclick: () => addSheet(ctx, d) }, 'Nothing planned · tap to add a movie')));
 }
@@ -667,24 +615,11 @@ function phonePlanCard(ctx, o) {
     el('span', { className: 'm-chev', ariaHidden: 'true' }, '›'));
 }
 
-function phonePickCard(ctx, p) {
-  const st = pickStatus(ctx, p);
-  const m = ctx.movieById.get(p.movie_id) ?? { id: p.movie_id, name: p.movie_name, slug: p.movie_slug, poster: p.poster_url };
-  return el('button', { className: `m-card pick ${st.cls}`, type: 'button', onclick: () => movieDaySheet(m, p.day, ctx.g, p) },
-    el('span', { className: 'pp' }, poster(p.poster_url ?? m.poster, p.movie_name), el('span', { className: `pick-mark ${st.cls}` }, st.cls === 'warn' ? '!' : '✓')),
-    el('span', { className: 'm-card-main' },
-      el('span', { className: 'm-time' }, 'Pencilled in'),
-      el('span', { className: 'm-title' }, p.movie_name),
-      el('span', { className: 'm-sub' }, st.note)),
-    el('span', { className: 'm-chev', ariaHidden: 'true' }, '›'));
-}
-
-/** Add a movie to a day: what's showing with its times (tap to plan), and everything else to pencil in. */
+/** Add a movie to a day: what's showing, what's expected, and everything else (plan it anyway). */
 function addSheet(ctx, day) {
   const info = ctx.dayInfo.get(day);
   const showing = groupBy(ctx.showsByDay.get(day) ?? [], (s) => s.movieId);
   const wanted = new Set(ctx.wants.map((w) => w.movie_id));
-  const pencilled = new Set((ctx.picksByDay.get(day) ?? []).map((p) => p.movie_name));
   const extra = ctx.wants.filter((w) => !ctx.movieById.has(w.movie_id))
     .map((w) => ({ id: w.movie_id, name: w.movie_name, slug: w.movie_slug, poster: w.poster_url }));
   const everyone = [...ctx.movies, ...extra.filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)];
@@ -714,17 +649,12 @@ function addSheet(ctx, day) {
           el('b', {}, m.name, wanted.has(m.id) ? el('span', { className: 'star' }, ' ★') : ''),
           el('span', { className: 'muted' }, [opensLabel(m), m.rating, fmtRun(m.runTime)].filter(Boolean).join(' · '))),
         el('button', { className: 'btn sm primary m-plan', type: 'button', onclick: () => movieDaySheet(m, day, ctx.g) }, 'Plan'))),
-      off.length > 0 && el('h3', {}, 'Pencil in'),
-      off.length > 0 && el('p', { className: 'muted' }, info ? 'AMC doesn’t list these that day. Pencil one in (it gets a warning), or Plan it if you know it’s on.'
-        : 'That day hasn’t been read yet. Pencil one in until it is, or Plan it if you already know it’s on.'),
+      off.length > 0 && el('h3', {}, 'Everything else'),
+      off.length > 0 && el('p', { className: 'muted' }, 'Not listed for that day. Plan one anyway if you know it’s on (say you already have tickets).'),
       off.map((m) => el('div', { className: 'm-addrow slim' },
         poster(m.poster, m.name),
         el('b', {}, m.name, wanted.has(m.id) ? el('span', { className: 'star' }, ' ★') : ''),
-        pencilled.has(m.name)
-          ? el('span', { className: 'pill warn' }, 'Pencilled in')
-          : el('span', { className: 'row-btns' },
-            el('button', { className: 'btn sm ghost warnbtn', type: 'button', onclick: act(() => api.addPick({ day, movie_id: m.id ?? null, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }), `${m.name} pencilled in for ${fmtDate(day)}`) }, 'Pencil in'),
-            el('button', { className: 'btn sm ghost', type: 'button', title: 'Plan it anyway (say you already have tickets)', onclick: () => movieDaySheet(m, day, ctx.g) }, 'Plan')))),
+        el('button', { className: 'btn sm ghost', type: 'button', onclick: () => movieDaySheet(m, day, ctx.g) }, 'Plan'))),
       !on.length && !off.length && el('p', { className: 'muted' }, 'No movies match.'),
     ].flat(Infinity).filter((n) => n != null && n !== false));
   };
@@ -814,7 +744,7 @@ function catalog(ctx) {
     el('div', { className: 'cat-head' },
       el('div', { className: 'cat-title' }, el('h2', {}, 'Movies'), el('span', { className: 'muted' }, `${all.length}`), toggle),
       tabs, search),
-    el('p', { className: 'cat-hint muted' }, 'Drag a poster onto a day: green = showing (times posted), blue = expected from its release date, amber = gets pencilled in.'),
+    el('p', { className: 'cat-hint muted' }, 'Drag a poster onto a day to plan it: green = showing (times posted), blue = expected from its release date, amber = not listed that day.'),
     grid);
   return box;
 }
@@ -883,8 +813,8 @@ function showingCard(g, o, now) {
   return card;
 }
 
-/** A movie on a day: plan it for that day (no time needed), or pick one of its times, or pencil it in. */
-async function movieDaySheet(m, day, g, pick = null) {
+/** A movie on a day: plan it for that day (no time needed), or pick one of its times. */
+async function movieDaySheet(m, day, g) {
   const [shows, theatres, dayInfo] = await Promise.all([api.showtimes({ movie: m.id, date: day }), api.theatres(), api.days()]);
   const movie = (m.id != null && (await api.movie(m.id))) || m;
   const info = dayInfo.get(day);
@@ -907,7 +837,6 @@ async function movieDaySheet(m, day, g, pick = null) {
     save.setAttribute('aria-disabled', 'true');
     try {
       await api.planShowing(outing, people, who.status());
-      await api.clearPick(day, movie.name).catch(() => {});
       toast(`${movie.name} planned for ${fmtDate(day)}`);
       closeSheet();
       render();
@@ -925,29 +854,22 @@ async function movieDaySheet(m, day, g, pick = null) {
         el('div', { className: 'meta' }, [movie.rating, fmtRun(movie.runTime)].filter(Boolean).map((x) => el('span', {}, x)),
           el('span', { className: `pill ${showing ? 'reserved' : expected ? 'expect' : 'warn'}` },
             showing ? `Showing that day (${shows.length})` : expected ? 'Expected that day' : info && info.count >= FULL_DAY ? 'Not listed that day' : 'Not posted yet'),
-          movie.release && el('span', {}, opensLabel(movie)),
-          pick && el('span', { className: 'pill warn' }, 'Pencilled in'))),
+          movie.release && el('span', {}, opensLabel(movie)))),
       el('button', { className: 'btn sm ghost', type: 'button', ariaLabel: 'Close', onclick: closeSheet }, icon('x'))),
     expected && el('section', { className: 'panel notice expectbox' }, icon('ticket'), el('p', {},
       el('b', {}, `${opensLabel(movie)}. `),
       el('span', { className: 'muted' }, `AMC hasn't posted times for ${fmtDate(day)} yet, but it should be on by then. Plan it now; times show up here once they're posted.`))),
     !showing && !expected && el('section', { className: 'panel notice warnbox' }, icon('warn'), el('p', {},
       el('b', {}, info && info.count >= FULL_DAY ? `AMC doesn't list it on ${fmtDate(day)}. ` : `AMC hasn't posted ${fmtDate(day)} for it yet. `),
-      el('span', { className: 'muted' }, future ? 'You can still plan it if you know it is on (say you already have tickets), or pencil it in for now.' : ''))),
+      el('span', { className: 'muted' }, future ? 'You can still plan it if you know it is on (say you already have tickets).' : ''))),
     future && el('section', {}, el('h3', {}, "Who's going"), who.node),
-    future && el('div', { className: 'row' }, save,
-      !pick && el('button', { className: 'btn ghost', type: 'button', onclick: act(() => api.addPick({ day, movie_id: movie.id ?? null, movie_name: movie.name, movie_slug: movie.slug ?? null, poster_url: movie.poster ?? null }), `${movie.name} pencilled in for ${fmtDate(day)}`) }, 'Just pencil it in'),
-      pick && el('button', { className: 'btn ghost danger', type: 'button', onclick: act(() => api.removePick(pick.id), `${movie.name} taken off ${fmtDate(day)}`) }, icon('x'), 'Remove pencil mark')),
+    future && el('div', { className: 'row' }, save),
     future && el('p', { className: 'muted' }, "No time needed: it takes one of that A-List week's admissions either way, and you can add the time later."),
     showing && el('details', { className: 'times-more' }, el('summary', {}, `Or pick one of its ${shows.length} showtimes`),
       byTheatre(shows, theatres, (list, th) => showtimeGroups(list, th, movie, g))),
     el('div', { className: 'row' },
       movie.id != null && el('a', { className: 'btn ghost sm', href: `/movie/${movie.id}?week=${weekOf(day)}` }, 'Its whole week'),
-      el('button', { className: 'btn ghost sm', type: 'button', onclick: () => manualSheet(g, { movie: movie.name, day }) }, icon('plus'), 'Add by hand')),
-    pick && future && el('section', { className: 'moveto' }, el('h3', {}, 'Move the pencil mark to another day'),
-      el('div', { className: 'moveto-days' }, Array.from({ length: 14 }, (_, i) => addDays(isoDay(), i)).filter((d) => d !== day).map((d) =>
-        el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.movePick(pick.id, d), `${movie.name} moved to ${fmtDate(d)}`) },
-          d === isoDay() ? 'Today' : fmtDate(d, { weekday: 'short', month: 'short', day: 'numeric' }))))));
+      el('button', { className: 'btn ghost sm', type: 'button', onclick: () => manualSheet(g, { movie: movie.name, day }) }, icon('plus'), 'Add by hand')));
 }
 
 // ---- movies ---------------------------------------------------------------------------------
@@ -1099,7 +1021,7 @@ async function moviePage(id) {
           ? el('div', { className: 'row' }, el('button', { className: 'btn sm primary', type: 'button', onclick: () => movieDaySheet(m, d, g) }, icon('plus'), `Plan it for ${d === today ? 'today' : weekdayOf(d)}`),
             el('span', { className: 'muted' }, `Expected (${opensLabel(m)}); times not posted yet.`))
         : el('p', { className: 'muted' }, full(d) ? 'Not showing this day.' : info ? 'Not posted for this day yet. ' : "This day hasn't been read from AMC yet. ",
-          el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.addPick({ day: d, movie_id: m.id, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }), `${m.name} pencilled in for ${fmtDate(d)}`) }, 'Pencil in'),
+          el('button', { className: 'btn sm ghost', type: 'button', onclick: () => movieDaySheet(m, d, g) }, 'Plan anyway'),
           el('button', { className: 'btn sm ghost', type: 'button', onclick: () => manualSheet(g, { movie: m.name, day: d }) }, icon('plus'), 'Add by hand'))));
     return out;
   });
@@ -1271,7 +1193,6 @@ function showtimeSheet(s, t, movie, g) {
     save.setAttribute('aria-disabled', 'true');
     try {
       await api.planShowing(outing, people, who.status());
-      await api.clearPick(s.date, s.movieName).catch(() => {});
       toast(people.length > 1 ? 'Added for everyone' : 'Added to the plan');
       closeSheet();
       render();
@@ -1348,7 +1269,6 @@ async function manualSheet(g, prefill = {}) {
     if (!people.length) return toast('Pick who is going', true);
     try {
       await api.planShowing(o, people, who.status());
-      await api.clearPick(day.value, o.movie_name).catch(() => {});
       toast('Added to the plan');
       closeSheet();
       render();
@@ -1372,7 +1292,7 @@ async function manualSheet(g, prefill = {}) {
 async function theatresPage() {
   const saved = await api.theatres();
   view(heading('Where we watch', 'Theatres'),
-    el('p', { className: 'muted' }, "The scraper runs every hour and reads one day per theatre switched on here: today first, then days someone has planned or pencilled in, then every date AMC lists (months out, for advance tickets), nearest and stalest first. AMC's site lets one page through per run, so keep it to one theatre."),
+    el('p', { className: 'muted' }, "The scraper runs every hour and reads one day per theatre switched on here: today first, then days someone has planned something on, then every date AMC lists (months out, for advance tickets), nearest and stalest first. AMC's site lets one page through per run, so keep it to one theatre."),
     saved.length
       ? table([
         { label: 'Theatre', val: (t) => t.name, cell: (t) => link(`/theatre/${t.id}`, t.name), num: false },
