@@ -6,8 +6,8 @@ Static site (no framework), same Supabase project and shared login as [durpeesqu
 
 - **Plan** (`/?view=week|month|year&date=`): a calendar beside a scrolling catalog of movie posters (along the
   bottom on a phone), with each person's 4 admissions for the week on top. Week is the A-List week (Fri → Thu) as a
-  vertical bar of days (click a day's date for what's on it); month has a row per A-List week; year shows the A-List
-  year, November to October, starting November 2026. A showing is one kind of entry: someone is going. Click it to
+  vertical bar of days (click a day's date for what's on it); month has a row per A-List week; year is a calendar
+  year (2026 starts at November, when the memberships began; ‹ › switch years). A showing is one kind of entry: someone is going. Click it to
   note a seat, set a time, add the other person, take someone off, or open AMC's seat map.
 - **Drag and drop** (mouse, or press-and-hold on a phone; the page scrolls at the screen edges): drag a poster onto a
   day to plan it there. While dragging, days turn green (AMC lists it that day), blue (expected from its release date)

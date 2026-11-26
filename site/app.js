@@ -212,15 +212,11 @@ function freshBanner(f) {
 // amber if neither (you can still plan it, say when you already have tickets).
 
 const MODES = [['week', 'Week'], ['month', 'Month'], ['year', 'Year']];
-// The group's A-List memberships started in November 2026: the year view runs November to October from then on, and
-// nothing before it is shown.
+// The group's A-List memberships started in November 2026: nothing before then is shown. The year view is a calendar
+// year, so 2026 is just November and December.
 const STUBS_START = '2026-11-01';
-/** The November that starts the A-List year `day` is in (never before STUBS_START). */
-function stubYear(day) {
-  const [y, m] = day.split('-').map(Number);
-  const k = Math.max(0, Math.floor(((y - 2026) * 12 + (m - 11)) / 12));
-  return addMonths(STUBS_START, 12 * k);
-}
+/** The first month of `day`'s calendar year that the planner shows (January, or November in 2026). */
+const yearStart = (day) => (`${day.slice(0, 4)}-01-01` < STUBS_START ? STUBS_START : `${day.slice(0, 4)}-01-01`);
 let catalogTab = 'view'; // 'view': showing in the period on screen; 'wish': wishlist; 'all'
 let catalogQuery = '';
 
@@ -277,10 +273,11 @@ const act = (fn, okMsg) => async () => {
 
 /** The date n days / weeks / months / years from `date`, for the ‹ › buttons. */
 const stepDate = (mode, date, n) => (mode === 'week' ? addDays(weekOf(date), 7 * n)
-  : mode === 'month' ? addMonths(date, n) : addMonths(stubYear(date), 12 * n));
+  : mode === 'month' ? addMonths(date, n) : yearStart(`${Number(date.slice(0, 4)) + n}-01-01`));
 /** Can the ‹ button go back from here? Not to a month or A-List year before the memberships started. */
-const canGoBack = (mode, date) => mode === 'week' || stepDate(mode, date, -1) >= STUBS_START.slice(0, 7);
-const yearTitle = (date) => `${fmtDate(stubYear(date), { month: 'short', year: 'numeric' })} – ${fmtDate(addDays(addMonths(stubYear(date), 12), -1), { month: 'short', year: 'numeric' })}`;
+const canGoBack = (mode, date) => mode === 'week'
+  || (mode === 'year' ? date.slice(0, 4) > STUBS_START.slice(0, 4) : stepDate(mode, date, -1) >= STUBS_START.slice(0, 7));
+const yearTitle = (date) => date.slice(0, 4);
 
 function planBar(ctx) {
   const { mode, date, today } = ctx;
@@ -429,10 +426,11 @@ function monthView(ctx) {
     }))));
 }
 
-/** Year: twelve small months; a day is coloured by what's on it. */
+/** Year: the months of a calendar year (from November in 2026); a day is coloured by what's on it. */
 function yearView(ctx) {
-  const start = stubYear(ctx.date);
-  return el('div', { className: 'year' }, Array.from({ length: 12 }, (_, i) => {
+  const start = yearStart(ctx.date);
+  const months = 12 - (Number(start.slice(5, 7)) - 1);
+  return el('div', { className: 'year' }, Array.from({ length: months }, (_, i) => {
     const first = addMonths(start, i);
     const days = monthDays(first);
     let count = 0;
@@ -447,7 +445,7 @@ function yearView(ctx) {
       return el('a', { className: `yd ${state}${d === ctx.today ? ' today' : ''}`, href: `/?date=${d}`, title: tip ? `${fmtDate(d)}: ${tip}` : fmtDate(d) }, Number(d.slice(8)));
     })));
     return el('section', { className: 'ymonth', style: `--i:${i}` },
-      el('a', { className: 'ym-title', href: plansLink('month', first) }, fmtDate(first, { month: 'long', ...(i === 0 || first.endsWith('-01-01') ? { year: 'numeric' } : {}) }),
+      el('a', { className: 'ym-title', href: plansLink('month', first) }, fmtDate(first, { month: 'long' }),
         count ? el('span', { className: 'pill planned' }, `${count} ${count === 1 ? 'movie' : 'movies'}`) : null),
       el('div', { className: 'ym-head' }, weekDays(weeks[0]).map((d) => el('span', {}, weekdayOf(d).slice(0, 1)))),
       grid);
@@ -465,7 +463,8 @@ function phonePlan(ctx) {
   const goTo = (d) => setQuery({ date: d === today ? '' : d });
   const w = weekOf(date);
   const [title, sub] = mode === 'week' ? [weekTitle(w), weekLabel(w)]
-    : mode === 'month' ? [fmtDate(date, { month: 'long' }), date.slice(0, 4)] : ['A-List year', yearTitle(date)];
+    : mode === 'month' ? [fmtDate(date, { month: 'long' }), date.slice(0, 4)]
+    : [yearTitle(date), yearStart(date) === STUBS_START ? 'Since November' : 'Year'];
   const head = el('section', { className: 'm-head' },
     el('div', { className: 'm-row' },
       el('button', { className: 'm-icon', type: 'button', ariaLabel: 'Previous', disabled: !canGoBack(mode, date), onclick: () => goTo(stepDate(mode, date, -1)) }, '‹'),
