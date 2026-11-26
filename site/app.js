@@ -180,7 +180,7 @@ function freshBanner(f) {
   const ageH = (Date.now() - Date.parse(ok.finished_at)) / 36e5;
   const stale = ageH > 12 || failedSince;
   return el('p', { className: `fresh${stale ? ' stale' : ''}` }, stale && icon('warn'),
-    `Showtimes from amctheatres.com, last update ${ago(ok.finished_at)}. Each update reads one day: today every morning, the next two weeks in turn.`,
+    `Showtimes from amctheatres.com, last update ${ago(ok.finished_at)}. An update runs every hour and reads one day: today first, then days you've planned, then every date AMC lists, as far out as it goes.`,
     failedSince && el('span', { className: 'muted' }, ` Last update failed: ${f.last.error ?? 'unknown error'}`));
 }
 
@@ -1295,7 +1295,7 @@ async function manualSheet(g, prefill = {}) {
 async function theatresPage() {
   const saved = await api.theatres();
   view(heading('Where we watch', 'Theatres'),
-    el('p', { className: 'muted' }, "The scraper reads one day's showtimes per run for every theatre switched on here: today each morning, then the next two weeks in turn. AMC's site lets one page through per run, so keep it to one theatre."),
+    el('p', { className: 'muted' }, "The scraper runs every hour and reads one day per theatre switched on here: today first, then days someone has planned or pencilled in, then every date AMC lists (months out, for advance tickets), nearest and stalest first. AMC's site lets one page through per run, so keep it to one theatre."),
     saved.length
       ? table([
         { label: 'Theatre', val: (t) => t.name, cell: (t) => link(`/theatre/${t.id}`, t.name), num: false },

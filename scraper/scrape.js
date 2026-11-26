@@ -12,8 +12,8 @@
 // stale; nothing tries to get around the block.
 //
 // Which day: today's page once a day (first run after midnight); then any day the group has a plan or a pencil mark on
-// that hasn't been read lately (the planner tells us, nearest first); otherwise the most overdue of the next HORIZON
-// days, nearer days counting as more overdue. What matters to the planner is which days each movie is on, so every
+// that hasn't been read lately (the planner tells us, nearest first); otherwise the most overdue of every date AMC lists
+// in its date picker, as far out as it goes (see dueHours). What matters to the planner is which days each movie is on, so every
 // read day counts, even one with nothing showing. What was read when is kept in state.json next to this file.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright-core';
@@ -24,7 +24,9 @@ const flag = (name) => args.includes(`--${name}`);
 const opt = (name, dflt) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : dflt; };
 
 const DRY = flag('dry');
-const HORIZON = 13; // days after today worth keeping fresh: the rest of this A-List week and all of next
+// How often a day needs reading again, by how far off it is: the coming week daily, the week after every other day,
+// anything further (advance tickets, sometimes months out) about every five days.
+const dueHours = (daysOut) => (daysOut <= 7 ? 20 : daysOut <= 14 ? 40 : 120);
 const SITE = 'https://www.amctheatres.com';
 const FN = `${(process.env.SUPABASE_URL ?? '').replace(/\/$/, '')}/functions/v1/amc-ingest`;
 const TOKEN = process.env.AMC_INGEST_TOKEN ?? '';
@@ -57,17 +59,21 @@ function pickDay(t, st) {
   const today = localDay(tz);
   const s = st[t.slug] ?? {};
   const read = s.read ?? {};
+  const hoursAgo = (d) => (read[d] ? (Date.now() - Date.parse(read[d])) / 36e5 : Infinity);
+  // 1. today, once a day
   if (!read[today] || localDay(tz, 0, new Date(read[today])) !== today) return today;
-  const fresh = (d) => read[d] && Date.now() - Date.parse(read[d]) < 20 * 36e5;
-  const wanted = (t.want_days ?? []).filter((d) => d > today && !fresh(d)).sort();
+  // 2. days the group has a plan or a pencil mark on, nearest first
+  const wanted = (t.want_days ?? []).filter((d) => d > today && hoursAgo(d) >= 20).sort();
   if (wanted.length) return wanted[0];
-  const offered = new Set(s.offered ?? []);
+  // 3. every other date AMC lists (its date picker), as far out as it goes: the most overdue for its distance.
+  //    A date never read counts as twice overdue, so the far ones fill in without letting the near ones go stale.
+  const daysOut = (d) => Math.round((Date.parse(`${d}T12:00:00Z`) - Date.parse(`${today}T12:00:00Z`)) / 864e5);
+  const listed = (s.offered ?? []).filter((d) => d > today);
+  const pool = listed.length ? listed : Array.from({ length: 14 }, (_, i) => localDay(tz, i + 1));
   let best = null, bestScore = -1;
-  for (let i = 1; i <= HORIZON; i++) {
-    const d = localDay(tz, i);
-    if (offered.size && !offered.has(d)) continue;
-    const age = read[d] ? (Date.now() - Date.parse(read[d])) / 36e5 : Infinity;
-    const score = age / (1 + i / 3);
+  for (const d of pool) {
+    const n = daysOut(d);
+    const score = read[d] ? hoursAgo(d) / dueHours(n) : 2 + 1 / (1 + n); // unread: 2.x, nearer first
     if (score > bestScore) { best = d; bestScore = score; }
   }
   return best ?? today;
@@ -104,12 +110,20 @@ async function scrapeTheatre(page, t, st) {
   const got = await loadDay(page, t, day);
   const r = showtimesPage(got.html, { theatreSlug: t.slug, groups: got.groups });
   if (r.theatre && t.id && r.theatre.id !== t.id) throw new Error(`${t.slug} is AMC theatre ${r.theatre.id}, expected ${t.id}`);
+  // Asked for a date AMC has no schedule for, the page can show a different day instead. Only keep showtimes that
+  // fall on the day asked for (a show after midnight belongs to the night before); if none do, the day is empty.
+  const tz = t.tz || 'America/New_York';
+  const onDay = r.showtimes.filter((x) => localDay(tz, 0, new Date(Date.parse(x.starts_at) - 5 * 36e5)) === day);
+  if (onDay.length < r.showtimes.length) log(`  ${r.showtimes.length - onDay.length} showtimes on the page weren't on ${day}; left out`);
+  r.showtimes = onDay;
+  const used = new Set(onDay.map((x) => x.movie_id));
+  r.movies = r.movies.filter((m) => used.has(m.id));
   log(`${t.slug} ${day}: ${r.showtimes.length} showtimes, ${r.movies.length} movies`);
   const s = (st[t.slug] ??= { read: {} });
   s.read = { ...s.read, [day]: new Date().toISOString() };
-  for (const d of Object.keys(s.read)) if (d < localDay(t.tz || 'America/New_York', -3)) delete s.read[d]; // forget old days
+  for (const d of Object.keys(s.read)) if (d < localDay(tz, -3)) delete s.read[d]; // forget old days
   const offered = parseDates(flightData(got.html));
-  if (offered.length) s.offered = offered.slice(0, 60);
+  if (offered.length) s.offered = offered.slice(0, 400);
   return { slug: t.slug, days: [day], movies: r.movies, showtimes: r.showtimes.map((x) => ({ ...x, show_date: day })) };
 }
 
@@ -127,7 +141,8 @@ async function main() {
   let pages = 0;
   // One browser, one page per theatre. With more than one theatre switched on, Cloudflare will likely refuse the
   // second; that is recorded and left alone.
-  const browser = await chromium.launch({ channel: 'chrome', headless: false });
+  // a normal Chrome window, started minimized so an hourly run doesn't pop up over whatever you're doing
+  const browser = await chromium.launch({ channel: 'chrome', headless: false, args: flag('show') ? [] : ['--start-minimized'] });
   try {
     const page = await browser.newPage();
     for (const t of targets) {

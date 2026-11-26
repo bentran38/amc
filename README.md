@@ -63,9 +63,10 @@ the admission. A week is measured in the theatre's time zone.
   movies (name, rating, runtime, poster) and showtimes (id, UTC start, sold-out status, format group and its tags) out
   of that. Cloudflare refuses headless Chrome and plain HTTP, and lets a visible Chrome window load **one page** before
   refusing the next (seat pages always). So each run reads one page per theatre and stops; nothing tries to get
-  around the block. Which day it reads rotates: today's page once a day, otherwise the most overdue of the next 13
-  days (nearer days first), tracked in `scraper/state.json`. With four runs a day, today stays current and the rest of
-  this A-List week and all of next refresh every day or two. Days the group has a plan or a pencil mark on are read
+  around the block. Which day it reads: today's page once a day; then days with a plan or pencil mark; then every
+  date AMC's date picker lists, as far out as it goes (daily for the coming week, every other day the week after,
+  about every five days beyond, dates never read before re-reads), tracked in `scraper/state.json`. If AMC answers a
+  date it has no schedule for with another day, showtimes not on the asked-for day are left out. Days the group has a plan or a pencil mark on are read
   first (`amc.scrape_wants()`, passed to the scraper by the `targets` action), and every read day is noted in
   `amc.days_read`, even one with nothing on. A blocked run is logged and the site shows it.
 - **Ingest**: `scraper/scrape.js` sends the result to the `amc-ingest` Edge Function with the `x-ingest-token` header
@@ -95,8 +96,8 @@ Runs on a Windows PC with Google Chrome, since Cloudflare turns away cloud runne
   `SUPABASE_URL=https://<project>.supabase.co` and `AMC_INGEST_TOKEN=<same as the function secret>`.
 - `node scrape.js --dry --theatre baltimore/amc-columbia-14` prints what it would store; `node --env-file=.env scrape.js`
   stores it.
-- `scripts/scrape.ps1` runs it once and appends to `scraper/scrape.log`. Task Scheduler runs that at 8:00, 12:00, 16:00
-  and 20:00 (task "AMC showtimes"); a Chrome window opens for a few seconds each time.
+- `scripts/scrape.ps1` runs it once and appends to `scraper/scrape.log`. Task Scheduler runs that every hour from 7:00
+  to 23:00 (task "AMC showtimes"); Chrome starts minimized for a few seconds each time (`--show` to watch it).
 - If AMC changes its page, `parse.js` is where to look; the planner keeps working with Add by hand meanwhile.
 
 ## Local dev
