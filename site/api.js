@@ -47,12 +47,15 @@ export const deleteOuting = async (id) => ok(await db.from('outings').delete().e
  * length comes from what it had, else the movie's runtime, else 2.5 hours. Everyone going is re-checked.
  */
 export async function setShowingTime(o, hhmm) {
-  if (!hhmm) return ok(await db.from('outings').update({ starts_at: null, ends_at: null }).eq('id', o.id));
+  // a time you set yourself replaces the link to the AMC showtime it may have come from
+  const unlink = { showtime_id: null, purchase_url: null, auditorium: null };
+  if (!hhmm) return ok(await db.from('outings').update({ starts_at: null, ends_at: null, ...unlink }).eq('id', o.id));
   const day = hhmm < '05:00' ? new Date(Date.parse(`${o.show_date}T12:00:00Z`) + 864e5).toISOString().slice(0, 10) : o.show_date;
   const start = wallToUtc(day, hhmm, o.tz);
   const run = o.starts_at && o.ends_at ? Date.parse(o.ends_at) - Date.parse(o.starts_at)
     : ((o.movie_id != null && (await movie(o.movie_id))?.runTime) || 150) * 60e3;
-  return ok(await db.from('outings').update({ starts_at: start.toISOString(), ends_at: new Date(start.getTime() + run).toISOString() }).eq('id', o.id));
+  const same = o.starts_at && Date.parse(o.starts_at) === start.getTime();
+  return ok(await db.from('outings').update({ starts_at: start.toISOString(), ends_at: new Date(start.getTime() + run).toISOString(), ...(same ? {} : unlink) }).eq('id', o.id));
 }
 
 /**

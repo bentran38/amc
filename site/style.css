@@ -836,3 +836,6 @@ details.times-more[open] summary { margin-bottom: 4px; }
 .star { color: var(--warn); }
 #sheet-body > input[type='search'] { width: 100%; }
 .icon-only:disabled, .m-icon:disabled { opacity: 0.3; cursor: default; transform: none; }
+
+/* editing a past showing */
+.past-note { margin: 0; font-size: 0.82rem; }

@@ -28,7 +28,8 @@ Static site (no framework), same Supabase project and shared login as [durpeesqu
   to add it to the plan for any of you; each person is checked against the A-List rules before you save.
 - **Day** (`/day/<date>`) and **Theatre** (`/theatre/<id>`): everything on that day, by movie.
 - **Theatres** (`/theatres`): the theatres the scraper reads (AMC Columbia 14 on; Tysons Corner 16 set up but off).
-- **History**, **Rules**: what everyone has watched, and the rules below.
+- **History**, **Rules**: what everyone has watched (each row has Edit), and the rules below. Past showings can be fixed
+  like any other: change the date or time, add or take someone off, or delete the showing if you didn't go.
 - **Add by hand**: plan any showing on any day (suggests movies the scraper has seen and fills in their runtime).
 
 - **Planning by day**: what matters is which days a movie is on, not its exact showtimes. A showing has a date and,

@@ -724,7 +724,7 @@ function showingCard(g, o, now) {
 
   const goer = (a) => {
     const name = nameOf(g.members, a.user_id);
-    const acts = past ? [] : [
+    const acts = [
       el('button', { className: 'btn sm ghost', type: 'button', title: 'Seat', onclick: act(async () => {
         const seat = prompt(`Seat for ${name} (e.g. F12)`, a.seat ?? '');
         if (seat == null) return;
@@ -733,7 +733,7 @@ function showingCard(g, o, now) {
       el('button', { className: 'btn sm ghost danger', type: 'button', title: `Take ${name} off this showing`, onclick: act(() => api.removeAttendee(o.id, a.user_id), `${name} removed`) }, icon('x')),
     ];
     return el('div', { className: 'goer' }, avatar(name, true), el('span', { className: 'name' }, name),
-      el('span', { className: `pill ${past ? 'watched' : 'planned'}` }, past ? 'Watched' : 'Going'), past && a.seat && el('span', { className: 'muted' }, a.seat),
+      el('span', { className: `pill ${past ? 'watched' : 'planned'}` }, past ? 'Watched' : 'Going'),
       el('div', { className: 'acts' }, acts));
   };
 
@@ -742,9 +742,23 @@ function showingCard(g, o, now) {
   const hhmm = (iso) => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: o.tz }).format(new Date(iso));
   const timeIn = el('input', { type: 'time', value: hasTime(o) ? hhmm(o.starts_at) : '', ariaLabel: 'Showtime' });
   const timeRow = el('div', { className: 'settime' },
-    el('span', { className: 'muted' }, hasTime(o) ? 'Time' : 'No time set (it counts for the day). Know it?'), timeIn,
+    el('span', { className: 'muted' }, hasTime(o) ? 'Time' : past ? 'No time set' : 'No time set (it counts for the day). Know it?'), timeIn,
     el('button', { className: 'btn sm ghost', type: 'button', onclick: () => { if (!timeIn.value) return toast('Pick a time first', true); act(() => api.setShowingTime(o, timeIn.value), 'Time saved')(); } }, 'Save time'),
     hasTime(o) && el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.setShowingTime(o, ''), 'Time cleared') }, 'Clear'));
+  const dateIn = el('input', { type: 'date', value: o.show_date, min: STUBS_START, ariaLabel: 'Date' });
+  const dateRow = el('div', { className: 'settime' }, el('span', { className: 'muted' }, 'Date'), dateIn,
+    el('button', { className: 'btn sm ghost', type: 'button', onclick: () => {
+      if (!isDay(dateIn.value)) return toast('Pick a date first', true);
+      if (dateIn.value === o.show_date) return toast('That is its date already');
+      moveTo(o, dateIn.value);
+    } }, 'Change date'));
+  const remove = el('button', {
+    className: 'btn sm ghost danger', type: 'button',
+    onclick: () => {
+      if (!confirm(`Delete ${o.movie_name} on ${fmtDate(o.show_date)} for everyone on it? This can't be undone.`)) return;
+      act(() => api.deleteOuting(o.id), `${o.movie_name} deleted`)();
+    },
+  }, icon('x'), 'Delete showing');
   const card = el('article', { className: 'showing' },
     poster(o.poster_url, o.movie_name),
     el('div', { className: 'showing-main' },
@@ -753,18 +767,21 @@ function showingCard(g, o, now) {
         el('span', { className: 'when' }, whenLabel(o)),
         el('span', {}, o.theatre_name),
         o.format && o.format !== 'Standard' && fmtBadge(o.format)),
+      past && el('p', { className: 'muted past-note' }, "This one's in the past. Fix its date, time or who went, or delete it if you didn't go."),
       el('div', { className: 'goers' }, going.map(goer)),
-      (!past || !hasTime(o)) && timeRow,
+      dateRow,
+      timeRow,
       !past && el('div', { className: 'moveto' }, el('span', { className: 'muted' }, 'Move to'),
         el('div', { className: 'moveto-days' }, Array.from({ length: 14 }, (_, i) => addDays(isoDay(), i)).filter((d) => d !== o.show_date).map((d) =>
           el('button', { className: 'btn sm ghost', type: 'button', onclick: () => moveTo(o, d) },
             d === isoDay() ? 'Today' : fmtDate(d, { weekday: 'short', month: 'short', day: 'numeric' }))))),
-      !past && el('div', { className: 'showing-foot' },
+      el('div', { className: 'showing-foot' },
         notGoing.map((m) => el('button', {
           className: 'btn sm ghost', type: 'button',
           onclick: act(() => api.planShowing({ id: o.id }, [m.user_id]), `${m.display_name} added`),
         }, icon('plus'), m.display_name)),
-        o.purchase_url && el('a', { className: 'btn sm ghost', href: o.purchase_url, target: '_blank', rel: 'noopener' }, icon('seat'), 'Seats on AMC', icon('ext')))));
+        !past && o.purchase_url && el('a', { className: 'btn sm ghost', href: o.purchase_url, target: '_blank', rel: 'noopener' }, icon('seat'), 'Seats on AMC', icon('ext')),
+        remove)));
   card.dataset.state = state;
   return card;
 }
@@ -1282,6 +1299,7 @@ async function historyPage() {
       { label: 'Theatre', val: (o) => o.theatre_name, num: false },
       { label: 'Format', val: (o) => o.format ?? '', cell: (o) => (o.format ? fmtBadge(o.format) : '–'), num: false },
       { label: 'Who', val: (o) => (o.attendees ?? []).map((a) => nameOf(g.members, a.user_id)).join(', '), num: false },
+      { label: '', val: () => '', cell: (o) => el('button', { className: 'btn sm ghost', type: 'button', title: 'Fix its date, time or who went, or delete it', onclick: () => showingSheet(g, o) }, 'Edit'), num: false },
     ], past, { sortCol: 0 }));
 }
 
