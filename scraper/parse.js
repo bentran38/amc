@@ -119,3 +119,57 @@ export function showtimesPage(html, { theatreSlug, groups = {} }) {
 /** Is this the Cloudflare block page rather than AMC's? */
 export const isBlocked = (html, title = '') =>
   /Attention Required|Just a moment|cf-error-details|challenge-platform\/h\/[a-z]\/orchestrate/i.test(title + html.slice(0, 20000)) && !html.includes('__next_f');
+
+// ---- the movies page (/movies): Now Playing, Events and Coming Soon --------------------------------------------
+
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const isoFromLong = (s) => {
+  const m = /^([A-Za-z]+) (\d{1,2}), (\d{4})$/.exec(s.trim());
+  const mo = m && MONTHS.indexOf(m[1].toLowerCase());
+  return m && mo >= 0 ? `${m[3]}-${String(mo + 1).padStart(2, '0')}-${m[2].padStart(2, '0')}` : null;
+};
+
+// One-off showings rather than a movie's run: fan events, early access, sensory-friendly and private screenings, opera,
+// ballet, concerts, live viewings, sports. They play on their date only (and A-List doesn't cover most of them).
+const EVENT = /fan event|early access|insider screening|sensory friendly|private theatre rental|met opera|^rbo\b|live viewing|live on stage|\blive$|concert|carnegie hall|\bufc\b|screen unseen|scream unseen|crunchyroll|sneak peek|world tour/i;
+// Anniversary re-releases and reissues usually play about a week.
+const REISSUE = /anniversary|\(re\d*\)|\(re-?release\)|reissue/i;
+/** 'event' (its date only), 'reissue' (about a week) or 'film' (a normal run). */
+export const releaseKind = (name = '') => (EVENT.test(name) ? 'event' : REISSUE.test(name) ? 'reissue' : 'film');
+
+/**
+ * Every movie card on AMC's movies page: { id, slug, name, poster_url, run_time, rating, release_date, status, kind }.
+ * status is 'released' ("Released November 6, 2026") or 'opening' ("Opening December 18, 2026"); release_date is
+ * that date (YYYY-MM-DD). The page holds all three tabs' lists in its data, so one load has the coming-soon ones too.
+ */
+export function moviesPage(html) {
+  const data = flightData(html);
+  const out = new Map();
+  const starts = [...data.matchAll(/\["\$","li","[^"]*",\{"children":\["\$","div",null,\{"className":"[^"]*","role":"group","aria-label":"((?:[^"\\]|\\.)*)"/g)];
+  starts.forEach((m, k) => {
+    const card = data.slice(m.index, Math.min(starts[k + 1]?.index ?? Infinity, m.index + 6000));
+    const href = /"href":"\/movies\/([a-z0-9-]+-(\d+))"/.exec(card);
+    if (!href) return;
+    const [, slug, id] = href;
+    if (/^private-theatre-rental/.test(slug)) return;
+    let name;
+    try { name = JSON.parse(`"${m[1]}"`); } catch { name = m[1]; }
+    const when = /"children":\["(Opening|Released|Opens|Releases) ","([A-Za-z]+ \d{1,2}, \d{4})"\]/.exec(card);
+    const run = /(\d+) HR (\d+) MIN/.exec(card);
+    const runOnlyMin = !run && /(\d+) MIN/.exec(card);
+    const rating = /"MPAA Rating: ([^"]+)"/.exec(card);
+    const poster = /"src":"(https:\/\/[^"]+)"/.exec(card);
+    const movie = {
+      id: Number(id), slug, name,
+      poster_url: poster ? poster[1] : null,
+      run_time: run ? Number(run[1]) * 60 + Number(run[2]) : runOnlyMin ? Number(runOnlyMin[1]) : null,
+      rating: rating ? rating[1] : null,
+      release_date: when ? isoFromLong(when[2]) : null,
+      status: when ? (/^Open/.test(when[1]) ? 'opening' : 'released') : null,
+      kind: releaseKind(name),
+    };
+    const prev = out.get(slug);
+    if (!prev || (!prev.release_date && movie.release_date)) out.set(slug, movie);
+  });
+  return [...out.values()];
+}

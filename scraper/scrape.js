@@ -3,6 +3,10 @@
 //   node scrape.js                                        one day's showtimes at the theatres switched on in the planner
 //   node scrape.js --dry --theatre baltimore/amc-columbia-14   print what it found, store nothing
 //   node scrape.js --date 2026-12-04                      read that day instead of picking one
+//   node scrape.js --releases                             read AMC's movies page (what's coming, and when it opens)
+//
+// Once a day, after today's showtimes are in, a run reads AMC's movies page instead of a theatre's day: every movie AMC
+// lists (Now Playing, Events, Coming Soon) with its opening date, which the planner uses for days AMC hasn't posted.
 //
 // Env: SUPABASE_URL, AMC_INGEST_TOKEN (not needed with --dry). Run on a schedule from this PC (scripts/scrape.ps1).
 //
@@ -17,7 +21,7 @@
 // read day counts, even one with nothing showing. What was read when is kept in state.json next to this file.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright-core';
-import { showtimesPage, isBlocked, parseDates, flightData } from './parse.js';
+import { showtimesPage, moviesPage, isBlocked, parseDates, flightData } from './parse.js';
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(`--${name}`);
@@ -104,6 +108,19 @@ async function loadDay(page, t, day) {
   return { html, groups };
 }
 
+// AMC's movies page lists everything it has coming (Now Playing, Events and Coming Soon, all in one page's data), each
+// with its opening date. Read once a day.
+const moviesDue = (st) => !st.movies_page || Date.now() - Date.parse(st.movies_page) > 20 * 36e5;
+async function loadMoviesPage(page) {
+  const url = `${SITE}/movies?availability=COMING_SOON`;
+  const res = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  await page.waitForSelector('[role="tablist"]', { timeout: 15_000 }).catch(() => {});
+  const html = await page.content();
+  if (res?.status() === 403 || isBlocked(html, await page.title())) throw Object.assign(new Error(`Blocked by Cloudflare at ${url}`), { blocked: true });
+  if (!res?.ok()) throw new Error(`AMC returned ${res?.status()} for ${url}`);
+  return html;
+}
+
 async function scrapeTheatre(page, t, st) {
   const day = opt('date') ?? pickDay(t, st);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error(`Bad --date ${day}`);
@@ -138,35 +155,52 @@ async function main() {
   const started_at = new Date().toISOString();
   const st = loadState();
   const theatres = [], errors = [];
+  let releases = [];
   let pages = 0;
-  // One browser, one page per theatre. With more than one theatre switched on, Cloudflare will likely refuse the
-  // second; that is recorded and left alone.
-  // a normal Chrome window, started minimized so an hourly run doesn't pop up over whatever you're doing
+  // This run's one page: AMC's movies page once a day (after today's showtimes are in), otherwise a theatre's day.
+  const t0 = targets[0];
+  const todayIn = (t) => !!st[t.slug]?.read?.[localDay(t.tz || 'America/New_York')];
+  const releasesRun = flag('releases') || (!only && !opt('date') && todayIn(t0) && moviesDue(st));
+  // One browser, one page. With more than one theatre switched on, Cloudflare will likely refuse the second; that is
+  // recorded and left alone. A normal Chrome window, started minimized so an hourly run doesn't pop up over things.
   const browser = await chromium.launch({ channel: 'chrome', headless: false, args: flag('show') ? [] : ['--start-minimized'] });
   try {
     const page = await browser.newPage();
-    for (const t of targets) {
+    if (releasesRun) {
       try {
         pages++;
-        theatres.push(await scrapeTheatre(page, t, st));
+        releases = moviesPage(await loadMoviesPage(page));
+        log(`movies page: ${releases.length} movies, ${releases.filter((m) => m.status === 'opening').length} not open yet`);
+        if (!releases.length) throw new Error('No movies found on the movies page (has AMC changed it?)');
       } catch (e) {
-        errors.push(`${t.slug}: ${e.message}`);
-        log(`! ${t.slug}: ${e.message}`);
-        if (e.blocked) break; // no point carrying on
+        errors.push(`movies page: ${e.message}`);
+        log(`! movies page: ${e.message}`);
+      }
+    } else {
+      for (const t of targets) {
+        try {
+          pages++;
+          theatres.push(await scrapeTheatre(page, t, st));
+        } catch (e) {
+          errors.push(`${t.slug}: ${e.message}`);
+          log(`! ${t.slug}: ${e.message}`);
+          if (e.blocked) break; // no point carrying on
+        }
       }
     }
   } finally {
     await browser.close();
   }
 
-  const run = { started_at, ok: errors.length === 0, pages, error: errors.join('\n') || null, runner: process.env.GITHUB_ACTIONS ? 'github-actions' : 'local', theatres };
+  const run = { started_at, ok: errors.length === 0, pages, error: errors.join('\n') || null, runner: process.env.GITHUB_ACTIONS ? 'github-actions' : 'local', theatres, releases };
   const count = theatres.reduce((n, t) => n + t.showtimes.length, 0);
   if (DRY) {
-    console.log(JSON.stringify({ ...run, theatres: theatres.map((t) => ({ ...t, showtimes: t.showtimes.slice(0, 3), movies: t.movies.slice(0, 3) })) }, null, 2));
-    log(`dry run: ${count} showtimes over ${pages} pages`);
+    console.log(JSON.stringify({ ...run, releases: releases.slice(0, 5), theatres: theatres.map((t) => ({ ...t, showtimes: t.showtimes.slice(0, 3), movies: t.movies.slice(0, 3) })) }, null, 2));
+    log(`dry run: ${count} showtimes, ${releases.length} movies from the movies page, over ${pages} pages`);
   } else {
     const r = await fn('ingest', { run });
-    log(`stored ${r.showtimes} showtimes (${r.pruned} dropped) from ${pages} pages`);
+    log(`stored ${r.showtimes} showtimes (${r.pruned} dropped), ${r.releases ?? 0} release dates, from ${pages} pages`);
+    if (releasesRun && releases.length) st.movies_page = new Date().toISOString();
     saveState(st); // only once it is stored, so a failed upload gets retried next run
   }
   if (errors.length) process.exitCode = 1;

@@ -88,6 +88,7 @@ const AMC = 'https://www.amctheatres.com';
 const toMovie = (r) => ({
   id: r.id, slug: r.slug, name: r.name, rating: r.rating, runTime: r.run_time, poster: r.poster_url,
   url: `${AMC}/movies/${r.slug}`, firstSeen: r.first_seen,
+  release: r.release_date ?? null, releaseStatus: r.release_status ?? null, kind: r.release_kind ?? 'film', listedAt: r.listed_at ?? null,
 });
 
 let moviesCache;

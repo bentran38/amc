@@ -36,6 +36,13 @@ Static site (no framework), same Supabase project and shared login as [durpeesqu
   day needs no time, also on a day that hasn't been read yet (when you already have tickets). Showtimes are still
   there under "or pick one of its times" if you want one.
 
+- **Release dates**: once a day the scraper reads AMC's movies page (`/movies?availability=COMING_SOON`), which holds
+  every movie AMC lists, Now Playing, Events and Coming Soon, each with its opening date (`amc.movies.release_date`,
+  `release_kind`: film, reissue or event). AMC only posts a theatre's times about a week ahead, so for later days a
+  movie counts as **expected** from the day it opens: about four weeks for a film, a week for an anniversary reissue,
+  the day itself for an event. A day AMC has posted in full overrides that. Expected days turn blue when you drag a
+  poster over them, opening days show an "Opens" line, and the catalog and Movies page have a Coming soon list.
+
 ## A-List rules
 
 From AMC's [A-List terms](https://www.amctheatres.com/amcstubs/alist/terms-and-conditions), checked November 2026:

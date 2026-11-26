@@ -273,3 +273,18 @@ test('the scraper is told which planned or pencilled days to read, and ingest re
   assert.equal((await as(EVE, 'select * from amc.days_read')).rows.length, 0);
   await as(ANN, 'delete from amc.picks');
 });
+
+test('ingest stores release dates from the movies page without needing a theatre', async () => {
+  const r = await ingest({ started_at: new Date().toISOString(), ok: true, pages: 1, theatres: [], releases: [
+    { id: 77032, slug: 'dune-part-three-77032', name: 'Dune: Part Three', rating: null, run_time: 150, poster_url: 'https://example.com/d.jpg', release_date: '2026-12-18', status: 'opening', kind: 'film' },
+    { id: 84722, slug: 'avengers-doomsday-reald-3d-fan-event-84722', name: 'Avengers: Doomsday RealD 3D Fan Event', run_time: 151, release_date: '2026-12-20', status: 'opening', kind: 'event' },
+    { id: 72478, slug: 'disney-s-hexed-72478', name: "Disney's Hexed", release_date: '2026-11-06', status: 'released', kind: 'nonsense' },
+    { id: 1, slug: 'bad-poster-1', name: 'Bad', poster_url: 'http://insecure/x.jpg' },
+  ] });
+  assert.equal(r.releases, 3);
+  const rows = (await as(ANN, "select id, release_date::text d, release_status s, release_kind k, rating, run_time, listed_at is not null as listed from amc.movies where id in (77032, 84722, 72478, 1) order by id")).rows;
+  assert.deepEqual(rows.map((x) => [x.id, x.d, x.s, x.k]), [[72478, '2026-11-06', 'released', 'film'], [77032, '2026-12-18', 'opening', 'film'], [84722, '2026-12-20', 'opening', 'event']]);
+  // what the showtimes pages knew (rating, runtime) is kept when the movies page doesn't say
+  assert.equal(rows.find((x) => x.id === 72478).rating, 'PG');
+  assert.ok(rows.every((x) => x.listed));
+});

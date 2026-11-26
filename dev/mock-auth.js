@@ -40,6 +40,17 @@ const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String
 // (days 4 and 9), and the last two movies never showing ("Seen earlier"). Echoes of Juno opens on day 3.
 const localDay = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const dayPlus = (n) => { const d = new Date(now + n * DAY); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+// What AMC's movies page would say: the ones showing came out a while ago; Echoes of Juno opens in 3 days; a few
+// more open over the coming weeks (no times posted for them yet), plus a reissue and an event.
+MOVIES.forEach((m, i) => Object.assign(m, {
+  release_date: dayPlus(i === 8 ? 3 : -30 + i * 3), release_status: i === 8 ? 'opening' : 'released', release_kind: 'film', listed_at: new Date().toISOString(),
+}));
+MOVIES.push(...[['Polar Drift', 'PG-13', 141, 12, 'film'], ['The Lantern Keeper', 'PG', 104, 19, 'film'], ['Night Market 4', 'R', 118, 26, 'film'],
+  ['Glass Kingdom 25th Anniversary', 'PG-13', 162, 10, 'reissue'], ['Opera Live: Tosca', null, 190, 13, 'event']]
+  .map(([name, rating, run_time, d, kind], i) => ({
+    id: 71000 + i, slug: slugify(name, 71000 + i), name, rating, run_time, poster_url: null, first_seen: new Date().toISOString(),
+    updated_at: new Date().toISOString(), release_date: dayPlus(d), release_status: 'opening', release_kind: kind, listed_at: new Date().toISOString(),
+  })));
 const SHOWTIMES = [];
 for (const n of [0, 1, 2, 3, 5, 6, 7, 8, 10]) {
   const day = dayPlus(n);
