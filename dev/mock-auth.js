@@ -38,6 +38,7 @@ const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String
 
 // Columbia 14, today and the next ten days, as the rotating scraper would leave it: a few days not read yet
 // (days 4 and 9), and the last two movies never showing ("Seen earlier"). Echoes of Juno opens on day 3.
+const localDay = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const dayPlus = (n) => { const d = new Date(now + n * DAY); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const SHOWTIMES = [];
 for (const n of [0, 1, 2, 3, 5, 6, 7, 8, 10]) {
@@ -73,6 +74,8 @@ const tables = {
   movies: MOVIES,
   showtimes: SHOWTIMES,
   scrape_runs: RUNS,
+  // the days the scraper has read: the ones with showtimes, plus day 9 read and found empty
+  days_read: [...new Set(SHOWTIMES.map((x) => x.show_date)), dayPlus(9)].map((d) => ({ theatre_id: 349, show_date: d, read_at: new Date(now - 5 * 36e5).toISOString(), showtimes: 0 })),
   // Echoes of Juno pencilled in for a day that hasn't been read yet (so it carries a warning)
   picks: [{ id: 'p0', day: dayPlus(4), movie_id: MOVIES[8].id, movie_name: MOVIES[8].name, movie_slug: MOVIES[8].slug, poster_url: null, created_at: '' }],
   outings: [],
@@ -89,7 +92,7 @@ function addOuting(m, theatre, startMs, who) {
   tables.outings.push({
     id, showtime_id: 90000 + uid, movie_id: m.id, movie_name: m.name, movie_slug: m.slug, poster_url: null,
     theatre_id: theatre.id, theatre_name: theatre.name, auditorium: null, format: uid % 2 ? 'IMAX with Laser at AMC' : 'Laser at AMC',
-    starts_at: new Date(startMs).toISOString(), ends_at: new Date(startMs + m.run_time * 60e3).toISOString(), tz: theatre.tz,
+    show_date: localDay(startMs), starts_at: new Date(startMs).toISOString(), ends_at: new Date(startMs + m.run_time * 60e3).toISOString(), tz: theatre.tz,
     purchase_url: `https://www.amctheatres.com/showtimes/${90000 + uid}/seats`, note: null, created_at: new Date().toISOString(),
   });
   for (const [user_id, status, seat] of who) tables.attendees.push({ outing_id: id, user_id, status, seat: seat ?? null, updated_at: '' });
@@ -172,8 +175,11 @@ async function rpc(name, a) {
   if (name === 'members') return { data: people, error: null };
   if (name !== 'plan_showing') return err('Unknown function');
   const o = a.p_outing;
-  let outing = o.id ? tables.outings.find((x) => x.id === o.id) : o.showtime_id ? tables.outings.find((x) => x.showtime_id === o.showtime_id) : null;
-  const shape = outing ?? { ...o, ends_at: o.ends_at ?? new Date(Date.parse(o.starts_at) + 150 * 60e3).toISOString() };
+  let outing = o.id ? tables.outings.find((x) => x.id === o.id) : o.showtime_id ? tables.outings.find((x) => x.showtime_id === o.showtime_id)
+    : !o.starts_at ? tables.outings.find((x) => x.show_date === o.show_date && !x.starts_at && x.movie_name === o.movie_name) : null;
+  const shape = outing ?? (o.starts_at
+    ? { ...o, show_date: o.show_date ?? localDay(Date.parse(o.starts_at) - 6 * 36e5), ends_at: o.ends_at ?? new Date(Date.parse(o.starts_at) + 150 * 60e3).toISOString() }
+    : { ...o, starts_at: null, ends_at: null });
   for (const u of a.p_people) {
     const problem = checkPerson(u, shape, a.p_status, outing?.id);
     if (problem) return err(problem);

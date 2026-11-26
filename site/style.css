@@ -809,3 +809,17 @@ a.date[aria-current='date'] { border-color: var(--accent); color: var(--accent);
 }
 @keyframes sheetup { from { transform: translateY(100%); } to { transform: none; } }
 @media (prefers-reduced-motion: reduce) { dialog.sheet { transition: none; } }
+
+/* ---- planning by day: showings without a time ---- */
+.pl-time.anytime, .m-time.anytime { color: var(--muted); font-weight: 600; font-style: italic; }
+.settime { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; font-size: 0.82rem; }
+.settime input { padding: 5px 8px; font-size: 0.85rem; }
+details.times-more { border: 1px solid var(--border); border-radius: 14px; padding: 10px 14px; }
+details.times-more summary { cursor: pointer; font-size: 0.88rem; font-weight: 600; color: var(--muted); }
+details.times-more[open] summary { margin-bottom: 4px; }
+.row-btns { display: inline-flex; gap: 6px; }
+.m-plan { padding: 7px 16px; }
+@media (max-width: 760px) {
+  .m-addrow { grid-template-columns: 54px minmax(0, 1fr) auto; align-items: center; }
+  .m-addrow.slim { grid-template-columns: 36px minmax(0, 1fr) auto; }
+}

@@ -2,6 +2,7 @@
 // Movies and showtimes are read off amctheatres.com by the scraper (scraper/) and stored by the amc-ingest function:
 // supabase/migrations/20261125000000_amc_scrape.sql. Members only read those.
 import { supabase } from './session.js';
+import { wallToUtc } from './rules.js';
 
 const db = supabase.schema('amc');
 
@@ -40,6 +41,19 @@ export async function removeAttendee(outingId, userId) {
 }
 
 export const deleteOuting = async (id) => ok(await db.from('outings').delete().eq('id', id));
+
+/**
+ * Give a showing a time ('19:30', on its own day; after midnight counts as that night) or take it away (''). Its
+ * length comes from what it had, else the movie's runtime, else 2.5 hours. Everyone going is re-checked.
+ */
+export async function setShowingTime(o, hhmm) {
+  if (!hhmm) return ok(await db.from('outings').update({ starts_at: null, ends_at: null }).eq('id', o.id));
+  const day = hhmm < '05:00' ? new Date(Date.parse(`${o.show_date}T12:00:00Z`) + 864e5).toISOString().slice(0, 10) : o.show_date;
+  const start = wallToUtc(day, hhmm, o.tz);
+  const run = o.starts_at && o.ends_at ? Date.parse(o.ends_at) - Date.parse(o.starts_at)
+    : ((o.movie_id != null && (await movie(o.movie_id))?.runTime) || 150) * 60e3;
+  return ok(await db.from('outings').update({ starts_at: start.toISOString(), ends_at: new Date(start.getTime() + run).toISOString() }).eq('id', o.id));
+}
 
 // ---- theatres ------------------------------------------------------------------------------------
 
@@ -113,13 +127,17 @@ export async function showtimes({ theatre, movie: movieId, date } = {}) {
     (theatre == null || s.theatreId === theatre) && (movieId == null || s.movieId === movieId) && (!date || s.date === date));
 }
 
-/** For each day that has stored showtimes: { count, checked } (checked = when the scraper last read it). */
+/** For each day the scraper has read: { count, checked } (count = showtimes stored; a day can be read and empty). */
 export async function days() {
+  const [read, shows] = await Promise.all([db.from('days_read').select('*').then(ok), allShowtimes()]);
   const out = new Map();
-  for (const s of await allShowtimes()) {
-    const d = out.get(s.date) ?? { count: 0, checked: null };
+  for (const r of read) {
+    const d = out.get(r.show_date);
+    if (!d || r.read_at > d.checked) out.set(r.show_date, { count: 0, checked: r.read_at });
+  }
+  for (const s of shows) {
+    const d = out.get(s.date) ?? { count: 0, checked: s.seenAt };
     d.count++;
-    if (!d.checked || s.seenAt > d.checked) d.checked = s.seenAt;
     out.set(s.date, d);
   }
   return out;

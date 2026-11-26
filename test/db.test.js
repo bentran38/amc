@@ -215,3 +215,61 @@ test('members pencil movies in for a day, move and remove them; others see nothi
   await as(ANN, 'delete from amc.picks');
   assert.equal((await as(BOB, 'select * from amc.picks')).rows.length, 0);
 });
+
+// ---- planning by day ---------------------------------------------------------------------------
+
+const dayOf = (offsetDays) => new Date(Date.parse(`${base}T12:00:00Z`) + offsetDays * 864e5).toISOString().slice(0, 10);
+
+test('a showing can be just a movie on a day: it counts toward that A-List week but never overlaps', async () => {
+  const fri = dayOf(70); // a quiet week far from the other tests
+  const dayOnly = (name, d = fri) => ({ movie_name: name, theatre_name: 'AMC Test 12', theatre_id: 349, show_date: d, tz: TZ });
+  const a = await plan(BOB, dayOnly('Day One'), [BOB]);
+  const again = await plan(ANN, dayOnly('Day One'), [ANN]); // same movie, same day, no time: one shared showing
+  assert.equal(again, a);
+  const row = (await as(BOB, 'select show_date::text d, starts_at, ends_at from amc.outings where id = $1', [a])).rows[0];
+  assert.deepEqual([row.d, row.starts_at, row.ends_at], [fri, null, null]);
+  // two more the same day (no times, so no overlap) and one on Thursday make 4 for Bob that week
+  await plan(BOB, dayOnly('Day Two'), [BOB]);
+  await plan(BOB, dayOnly('Day Three'), [BOB]);
+  await plan(BOB, dayOnly('Day Four', dayOf(76)), [BOB]);
+  await assert.rejects(plan(BOB, dayOnly('Day Five', dayOf(75)), [BOB]), /4 movies in the A-List week/);
+  // the next Friday is a new week
+  await plan(BOB, dayOnly('Day Five', dayOf(77)), [BOB]);
+  // giving it a time later keeps its day and fills in a length
+  await as(BOB, 'update amc.outings set starts_at = $2 where id = $1', [a, wallToUtc(fri, '19:00', TZ).toISOString()]);
+  const timed = (await as(BOB, 'select show_date::text d, ends_at - starts_at as len from amc.outings where id = $1', [a])).rows[0];
+  assert.equal(timed.d, fri);
+  assert.ok(String(JSON.stringify(timed.len)).includes('150') || String(JSON.stringify(timed.len)).includes('2'));
+  // a timed showing gets its day from its time (a 1 AM show belongs to the day before)
+  const late = await plan(ANN, { movie_name: 'Late Show', theatre_name: 'AMC Test 12', tz: TZ, starts_at: wallToUtc(dayOf(71), '01:00', TZ).toISOString() }, [ANN]);
+  assert.equal((await as(ANN, 'select show_date::text d from amc.outings where id = $1', [late])).rows[0].d, fri);
+});
+
+test('JS rules count a showing without a time by its day', () => {
+  const fri = dayOf(84);
+  const adm = [0, 1, 2].map((i) => ({ outing_id: `d${i}`, status: 'planned', show_date: fri, starts_at: null, ends_at: null, tz: TZ }));
+  assert.equal(canAttend(adm, { show_date: fri, tz: TZ }).ok, true); // same day, no times: no overlap
+  adm.push({ outing_id: 'd3', status: 'planned', show_date: dayOf(90), starts_at: null, ends_at: null, tz: TZ });
+  assert.match(canAttend(adm, { show_date: dayOf(85), tz: TZ }).problems.join(), /Already has 4/);
+  assert.equal(canAttend(adm, { show_date: dayOf(91), tz: TZ }).ok, true);
+});
+
+test('the scraper is told which planned or pencilled days to read, and ingest records the days it read', async () => {
+  const want = day(5), other = day(6);
+  await as(ANN, `insert into amc.picks (day, movie_name) values ($1, 'Wanted Movie')`, [want]);
+  await db.exec('set role service_role');
+  const wants = async () => (await db.query('select theatre_id, day::text d from amc.scrape_wants()')).rows;
+  try {
+    assert.ok((await wants()).some((r) => r.theatre_id === 349 && r.d === want));
+  } finally { await db.exec('reset role'); }
+  await ingest({ started_at: new Date().toISOString(), ok: true, pages: 1, theatres: [{ slug: 'amc-columbia-14', days: [want, other], movies: [movie], showtimes: [st(501, want)] }] });
+  const read = (await as(ANN, 'select show_date::text d, showtimes from amc.days_read where theatre_id = 349 and show_date in ($1, $2) order by 1', [want, other])).rows;
+  assert.deepEqual(read.map((r) => [r.d, r.showtimes]), [[want, 1], [other, 0]]);
+  await db.exec('set role service_role');
+  try {
+    assert.ok(!(await wants()).some((r) => r.theatre_id === 349 && r.d === want), 'a day just read is not asked for again');
+  } finally { await db.exec('reset role'); }
+  await assert.rejects(as(ANN, 'select * from amc.scrape_wants()'), /permission denied/);
+  assert.equal((await as(EVE, 'select * from amc.days_read')).rows.length, 0);
+  await as(ANN, 'delete from amc.picks');
+});

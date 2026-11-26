@@ -11,9 +11,10 @@
 // per theatre and stops. If Cloudflare blocks it, the run is recorded as failed and the planner shows the data as
 // stale; nothing tries to get around the block.
 //
-// Which day: today's page once a day (first run after midnight), otherwise the most overdue of the next HORIZON days,
-// nearer days counting as more overdue. With four runs a day that keeps today current and every day of this A-List
-// week and the next refreshed every day or two. What was read when is kept in state.json next to this file.
+// Which day: today's page once a day (first run after midnight); then any day the group has a plan or a pencil mark on
+// that hasn't been read lately (the planner tells us, nearest first); otherwise the most overdue of the next HORIZON
+// days, nearer days counting as more overdue. What matters to the planner is which days each movie is on, so every
+// read day counts, even one with nothing showing. What was read when is kept in state.json next to this file.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 import { showtimesPage, isBlocked, parseDates, flightData } from './parse.js';
@@ -57,6 +58,9 @@ function pickDay(t, st) {
   const s = st[t.slug] ?? {};
   const read = s.read ?? {};
   if (!read[today] || localDay(tz, 0, new Date(read[today])) !== today) return today;
+  const fresh = (d) => read[d] && Date.now() - Date.parse(read[d]) < 20 * 36e5;
+  const wanted = (t.want_days ?? []).filter((d) => d > today && !fresh(d)).sort();
+  if (wanted.length) return wanted[0];
   const offered = new Set(s.offered ?? []);
   let best = null, bestScore = -1;
   for (let i = 1; i <= HORIZON; i++) {

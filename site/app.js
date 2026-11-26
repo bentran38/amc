@@ -11,7 +11,7 @@
 //   /rules               the A-List rules this follows
 import { requireLogin, hasAccess, signOut, HOME, loadProfile } from './session.js';
 import * as api from './api.js';
-import { PER_WEEK, PENDING, TERMS_URL, alistWeek, addWeeks, weekLabel, standing, canAttend, localTz, wallToUtc } from './rules.js';
+import { PER_WEEK, PENDING, TERMS_URL, addWeeks, weekLabel, standing, canAttend, localTz, wallToUtc, weekOfShowing, isUpcoming } from './rules.js';
 import {
   $, el, icon, fmtWhen, fmtTime, fmtRun, isoDay, avatar, poster, toast, field, stat, table, skeleton,
   fmtBadge, shortTags, fmtDate, ago,
@@ -146,11 +146,21 @@ async function groupData() {
   const [members, outings] = await Promise.all([api.members(), api.outings()]);
   const admissions = outings.flatMap((o) => (o.attendees ?? []).map((a) => ({
     outing_id: o.id, user_id: a.user_id, status: a.status, seat: a.seat,
-    starts_at: o.starts_at, ends_at: o.ends_at, tz: o.tz, movie_name: o.movie_name,
+    show_date: o.show_date, starts_at: o.starts_at, ends_at: o.ends_at, tz: o.tz, movie_name: o.movie_name,
   })));
   const of = (userId) => admissions.filter((a) => a.user_id === userId);
   return { members, outings, admissions, of };
 }
+
+// A showing has a date (show_date) and, only if someone knows it, a time (starts_at).
+const hasTime = (o) => !!o.starts_at;
+const isPast = (o) => !isUpcoming(o);
+const showingKey = (o) => `${o.show_date} ${o.starts_at ?? '~'}`; // a day's timed showings first, then the rest
+const byShowing = (a, b) => showingKey(a).localeCompare(showingKey(b));
+const timeLabel = (o, short = false) => (o.starts_at
+  ? (short ? fmtTime(o.starts_at, o.tz).replace(/\s?([AP])M$/i, (_, x) => x.toLowerCase()) : fmtTime(o.starts_at, o.tz))
+  : 'Any time');
+const whenLabel = (o) => (o.starts_at ? fmtWhen(o.starts_at, o.tz) : `${fmtDate(o.show_date, { weekday: 'short', month: 'short', day: 'numeric' })} · any time`);
 
 const nameOf = (members, id) => {
   const m = members.find((x) => x.user_id === id);
@@ -211,7 +221,7 @@ async function planPage() {
     g, wants, movies, shows, dayInfo, theatres, picks, today, date, mode,
     movieById: new Map(movies.map((m) => [m.id, m])),
     showsByDay: groupBy(shows, (s) => s.date),
-    plansByDay: groupBy(g.outings.slice().sort((a, b) => a.starts_at.localeCompare(b.starts_at)), (o) => isoDay(o.starts_at)),
+    plansByDay: groupBy(g.outings.slice().sort(byShowing), (o) => o.show_date),
     picksByDay: groupBy(picks, (p) => p.day),
   };
   ctx.range = mode === 'day' ? [date] : mode === 'week' ? weekDays(weekOf(date)) : mode === 'month' ? monthDays(date) : null;
@@ -271,13 +281,12 @@ function peopleStrip({ g, date, mode, today }) {
   const resetsIn = Math.max(0, Date.parse(`${addDays(weekOf(today), 7)}T06:00:00`) - now);
   return el('div', { className: 'peoplestrip' },
     g.members.map((m) => {
-      const inWeek = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === week)
-        .sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+      const inWeek = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && weekOfShowing(a) === week).sort(byShowing);
       const s = standing(g.of(m.user_id), now);
       const pips = Array.from({ length: PER_WEEK }, (_, i) => {
         const a = inWeek[i];
-        const cls = !a ? '' : new Date(a.starts_at) <= now ? 'used' : a.status;
-        return el('i', { className: `pip ${cls}`, title: a ? `${a.movie_name} · ${fmtWhen(a.starts_at, a.tz)}` : 'Open' });
+        const cls = !a ? '' : isPast(a) ? 'used' : a.status;
+        return el('i', { className: `pip ${cls}`, title: a ? `${a.movie_name} · ${whenLabel(a)}` : 'Open' });
       });
       const face = draggable(el('span', { className: 'grab', title: `Drag ${m.display_name} onto a showing to add them` }, avatar(m.display_name)), {
         type: 'member', data: { userId: m.user_id, name: m.display_name },
@@ -303,7 +312,7 @@ function dayDrop(ctx, node, day) {
     hint: (data, type) => {
       const id = type === 'pick' ? data.movie_id : data.id;
       const n = timesFor(ctx, id, day).length;
-      return n ? ['good', `${n} times · pick one`] : ['warn', ctx.dayInfo.has(day) ? 'Not showing · pencil in' : 'No times yet · pencil in'];
+      return n ? ['good', 'Showing that day · plan it'] : ['warn', ctx.dayInfo.has(day) ? 'Not showing · pencil in' : 'Not read yet · pencil in'];
     },
     onDrop: (data, type) => (type === 'pick' ? movePick(ctx, data, day) : dropMovie(ctx, data, day)),
   });
@@ -325,17 +334,17 @@ function movePick(ctx, p, day) {
 
 /** A planned showing: poster, time, title, who's going. Click for the details; drop a face on it to add them. */
 function planChip(ctx, o, size = 'md') {
-  const past = Date.parse(o.starts_at) <= Date.now();
+  const past = isPast(o);
   const going = (o.attendees ?? []).filter((a) => a.status !== 'cancelled');
   const state = past ? 'past' : going.some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
   const chip = el('button', {
     className: `pchipx plan ${state} ${size}`, type: 'button',
-    title: `${o.movie_name} · ${fmtWhen(o.starts_at, o.tz)} · ${state === 'past' ? 'watched' : state}`,
+    title: `${o.movie_name} · ${whenLabel(o)} · ${state === 'past' ? 'watched' : state}`,
     onclick: () => showingSheet(ctx.g, o),
   },
   size !== 'sm' && poster(o.poster_url, o.movie_name),
   el('span', { className: 'pl-text' },
-    el('span', { className: 'pl-time' }, size === 'sm' ? fmtTime(o.starts_at, o.tz).replace(/\s?([AP])M$/i, (_, x) => x.toLowerCase()) : fmtTime(o.starts_at, o.tz), size === 'lg' && o.format && o.format !== 'Standard' ? fmtBadge(o.format) : null),
+    el('span', { className: `pl-time${hasTime(o) ? '' : ' anytime'}` }, timeLabel(o, size === 'sm'), size === 'lg' && o.format && o.format !== 'Standard' ? fmtBadge(o.format) : null),
     el('span', { className: 'pl-title' }, o.movie_name)),
   size !== 'sm' && el('span', { className: 'faces' }, going.map((a) => avatar(nameOf(ctx.g.members, a.user_id), true))));
   if (!past) {
@@ -352,8 +361,8 @@ function planChip(ctx, o, size = 'md') {
 
 function pickStatus(ctx, p) {
   const n = timesFor(ctx, p.movie_id, p.day).length;
-  if (n) return { cls: 'ready', note: `${n} times now · pick one` };
-  return { cls: 'warn', note: ctx.dayInfo.has(p.day) ? 'Not showing this day' : 'No showtimes yet' };
+  if (n) return { cls: 'ready', note: 'Showing that day · tap to plan' };
+  return { cls: 'warn', note: ctx.dayInfo.has(p.day) ? 'Not showing this day' : 'Day not read yet' };
 }
 
 /** A pencilled-in movie, with a warning marker until it has showtimes that day. Drag it to another day or off. */
@@ -383,7 +392,7 @@ function dayItems(ctx, d, size) {
 function weekView(ctx) {
   const w = weekOf(ctx.date);
   const counts = ctx.g.members.map((m) => {
-    const n = ctx.g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === w).length;
+    const n = ctx.g.of(m.user_id).filter((a) => a.status !== 'cancelled' && weekOfShowing(a) === w).length;
     return el('span', {}, `${m.display_name} `, el('b', { className: n >= PER_WEEK ? 'warn' : '' }, `${n}/${PER_WEEK}`));
   });
   return el('div', { className: 'weekcol' },
@@ -439,9 +448,9 @@ function yearView(ctx) {
       const picks = ctx.picksByDay.get(d) ?? [];
       count += plans.length;
       const state = plans.length
-        ? (plans.every((o) => Date.parse(o.starts_at) <= now) ? 'past' : plans.some((o) => (o.attendees ?? []).some((a) => a.status === 'reserved')) ? 'reserved' : 'planned')
+        ? (plans.every(isPast) ? 'past' : plans.some((o) => (o.attendees ?? []).some((a) => a.status === 'reserved')) ? 'reserved' : 'planned')
         : picks.length ? 'pick' : '';
-      const tip = [...plans.map((o) => `${o.movie_name} ${fmtTime(o.starts_at, o.tz)}`), ...picks.map((p) => `${p.movie_name} (pencilled in)`)].join(', ');
+      const tip = [...plans.map((o) => `${o.movie_name} ${hasTime(o) ? fmtTime(o.starts_at, o.tz) : '(any time)'}`), ...picks.map((p) => `${p.movie_name} (pencilled in)`)].join(', ');
       return el('a', { className: `yd ${state}${d === ctx.today ? ' today' : ''}`, href: plansLink('day', d), title: tip ? `${fmtDate(d)}: ${tip}` : fmtDate(d) }, Number(d.slice(8)));
     })));
     return el('section', { className: 'ymonth', style: `--i:${i}` },
@@ -463,7 +472,8 @@ function dayView(ctx) {
   const label = (h) => { const x = h % 24; return `${x % 12 || 12} ${x < 12 ? 'AM' : 'PM'}`; };
   // side by side when showings overlap
   const lanes = [];
-  const placed = plans.map((o) => {
+  const untimed = plans.filter((o) => !hasTime(o));
+  const placed = plans.filter(hasTime).map((o) => {
     const s = Date.parse(o.starts_at), e = Date.parse(o.ends_at);
     let li = lanes.findIndex((end) => end <= s);
     if (li < 0) { li = lanes.length; lanes.push(e); } else lanes[li] = e;
@@ -485,6 +495,7 @@ function dayView(ctx) {
     el('div', { className: 'dv-head' },
       el('span', { className: 'muted' }, d < ctx.today ? 'Past day' : info ? `${info.count} showtimes stored · checked ${ago(info.checked)}` : "Showtimes for this day haven't been read yet"),
       d >= ctx.today && el('span', { className: 'muted' }, ' · drop a movie anywhere here')),
+    untimed.length > 0 && el('div', { className: 'dv-picks' }, el('span', { className: 'muted' }, 'Any time'), untimed.map((o) => planChip(ctx, o, 'md'))),
     picks.length > 0 && el('div', { className: 'dv-picks' }, el('span', { className: 'muted' }, 'Pencilled in'), picks.map((p) => pickChip(ctx, p, 'md'))),
     timeline), d);
 
@@ -540,28 +551,27 @@ function phonePeople({ g, date, mode, today }) {
   const week = weekOf(mode === 'day' || mode === 'week' ? date : today);
   const now = Date.now();
   return el('div', { className: 'm-people' }, g.members.map((m) => {
-    const inWeek = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === week)
-      .sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+    const inWeek = g.of(m.user_id).filter((a) => a.status !== 'cancelled' && weekOfShowing(a) === week).sort(byShowing);
     const held = standing(g.of(m.user_id), now).reservedUpcoming;
     return el('div', { className: 'm-person' }, avatar(m.display_name, true),
       el('span', {}, el('b', {}, m.display_name),
         el('span', { className: 'pips' }, Array.from({ length: PER_WEEK }, (_, i) => {
           const a = inWeek[i];
-          return el('i', { className: `pip ${!a ? '' : new Date(a.starts_at) <= now ? 'used' : a.status}` });
+          return el('i', { className: `pip ${!a ? '' : isPast(a) ? 'used' : a.status}` });
         }))),
       el('span', { className: 'muted' }, `${Math.max(0, PER_WEEK - inWeek.length)} left · ${held}/${PENDING} held`));
   }));
 }
 
 const dotsFor = (ctx, d) => [
-  ...(ctx.plansByDay.get(d) ?? []).map((o) => (Date.parse(o.starts_at) <= Date.now() ? 'past' : (o.attendees ?? []).some((a) => a.status === 'reserved') ? 'reserved' : 'planned')),
+  ...(ctx.plansByDay.get(d) ?? []).map((o) => (isPast(o) ? 'past' : (o.attendees ?? []).some((a) => a.status === 'reserved') ? 'reserved' : 'planned')),
   ...(ctx.picksByDay.get(d) ?? []).map(() => 'pick'),
 ].slice(0, 4).map((c) => el('i', { className: c }));
 
 function phoneWeek(ctx) {
   const days = weekDays(weekOf(ctx.date));
   const counts = ctx.g.members.map((m) => {
-    const n = ctx.g.of(m.user_id).filter((a) => a.status !== 'cancelled' && alistWeek(a.starts_at, a.tz) === weekOf(ctx.date)).length;
+    const n = ctx.g.of(m.user_id).filter((a) => a.status !== 'cancelled' && weekOfShowing(a) === weekOf(ctx.date)).length;
     return `${m.display_name} ${n}/${PER_WEEK}`;
   }).join(' · ');
   return [
@@ -610,14 +620,14 @@ function phoneDay(ctx, d) {
 }
 
 function phonePlanCard(ctx, o) {
-  const past = Date.parse(o.starts_at) <= Date.now();
+  const past = isPast(o);
   const going = (o.attendees ?? []).filter((a) => a.status !== 'cancelled');
   const state = past ? 'past' : going.some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
   const status = past ? 'Watched' : going.every((a) => a.status === 'reserved') ? 'Reserved' : going.some((a) => a.status === 'reserved') ? 'Partly reserved' : 'Planned · not booked yet';
   return el('button', { className: `m-card ${state}`, type: 'button', onclick: () => showingSheet(ctx.g, o) },
     poster(o.poster_url, o.movie_name),
     el('span', { className: 'm-card-main' },
-      el('span', { className: 'm-time' }, fmtTime(o.starts_at, o.tz), o.format && o.format !== 'Standard' ? fmtBadge(o.format) : null),
+      el('span', { className: `m-time${hasTime(o) ? '' : ' anytime'}` }, timeLabel(o), o.format && o.format !== 'Standard' ? fmtBadge(o.format) : null),
       el('span', { className: 'm-title' }, o.movie_name),
       el('span', { className: 'm-sub' }, el('span', { className: 'faces' }, going.map((a) => avatar(nameOf(ctx.g.members, a.user_id), true))), status)),
     el('span', { className: 'm-chev', ariaHidden: 'true' }, '›'));
@@ -654,22 +664,24 @@ function addSheet(ctx, day) {
     const off = everyone.filter((m) => !showing.has(m.id) && hit(m)).sort(order);
     list.replaceChildren(...[
       el('h3', {}, on.length ? `Showing ${fmtDate(day)}` : info ? `Nothing else showing ${fmtDate(day)}` : `${fmtDate(day)} hasn't been read from AMC yet`),
-      on.length ? el('p', { className: 'muted' }, 'Tap a time to plan it.') : null,
+      on.length ? el('p', { className: 'muted' }, 'Tap Plan. No need to pick a time.') : null,
       on.map((m) => el('div', { className: 'm-addrow' },
         poster(m.poster, m.name),
         el('div', { className: 'm-addmain' },
           el('b', {}, m.name, wanted.has(m.id) ? el('span', { className: 'star' }, ' ★') : ''),
-          el('span', { className: 'muted' }, [m.rating, fmtRun(m.runTime)].filter(Boolean).join(' · ')),
-          byTheatre(showing.get(m.id), ctx.theatres, (l, t) => showtimeGroups(l, t, m, ctx.g))))),
+          el('span', { className: 'muted' }, [m.rating, fmtRun(m.runTime), `${showing.get(m.id).length} showings`].filter(Boolean).join(' · '))),
+        el('button', { className: 'btn sm primary m-plan', type: 'button', onclick: () => movieDaySheet(m, day, ctx.g) }, 'Plan'))),
       off.length > 0 && el('h3', {}, 'Pencil in'),
-      off.length > 0 && el('p', { className: 'muted' }, info ? 'These aren’t showing that day. Pencil one in and it’s marked with a warning.'
-        : 'No times for that day yet. Pencil one in; it turns into “pick a time” once AMC lists it.'),
+      off.length > 0 && el('p', { className: 'muted' }, info ? 'AMC doesn’t list these that day. Pencil one in (it gets a warning), or Plan it if you know it’s on.'
+        : 'That day hasn’t been read yet. Pencil one in until it is, or Plan it if you already know it’s on.'),
       off.map((m) => el('div', { className: 'm-addrow slim' },
         poster(m.poster, m.name),
         el('b', {}, m.name, wanted.has(m.id) ? el('span', { className: 'star' }, ' ★') : ''),
         pencilled.has(m.name)
           ? el('span', { className: 'pill warn' }, 'Pencilled in')
-          : el('button', { className: 'btn sm ghost warnbtn', type: 'button', onclick: act(() => api.addPick({ day, movie_id: m.id ?? null, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }), `${m.name} pencilled in for ${fmtDate(day)}`) }, 'Pencil in'))),
+          : el('span', { className: 'row-btns' },
+            el('button', { className: 'btn sm ghost warnbtn', type: 'button', onclick: act(() => api.addPick({ day, movie_id: m.id ?? null, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }), `${m.name} pencilled in for ${fmtDate(day)}`) }, 'Pencil in'),
+            el('button', { className: 'btn sm ghost', type: 'button', title: 'Plan it anyway (say you already have tickets)', onclick: () => movieDaySheet(m, day, ctx.g) }, 'Plan')))),
       !on.length && !off.length && el('p', { className: 'muted' }, 'No movies match.'),
     ].flat(Infinity).filter((n) => n != null && n !== false));
   };
@@ -764,7 +776,7 @@ function showingSheet(g, o) {
 }
 
 function showingCard(g, o, now) {
-  const past = new Date(o.starts_at) <= now;
+  const past = isPast(o);
   const going = (o.attendees ?? []).slice().sort((a, b) => nameOf(g.members, a.user_id).localeCompare(nameOf(g.members, b.user_id)));
   const state = past ? 'past' : going.some((a) => a.status === 'reserved') ? 'reserved' : 'planned';
 
@@ -789,16 +801,23 @@ function showingCard(g, o, now) {
   };
 
   const notGoing = g.members.filter((m) => !going.some((a) => a.user_id === m.user_id));
-  const title = o.movie_id ? link(`/movie/${o.movie_id}?week=${alistWeek(o.starts_at, o.tz)}`, o.movie_name) : o.movie_name;
+  const title = o.movie_id ? link(`/movie/${o.movie_id}?week=${weekOf(o.show_date)}`, o.movie_name) : o.movie_name;
+  const hhmm = (iso) => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: o.tz }).format(new Date(iso));
+  const timeIn = el('input', { type: 'time', value: hasTime(o) ? hhmm(o.starts_at) : '', ariaLabel: 'Showtime' });
+  const timeRow = el('div', { className: 'settime' },
+    el('span', { className: 'muted' }, hasTime(o) ? 'Time' : 'No time set (it counts for the day). Know it?'), timeIn,
+    el('button', { className: 'btn sm ghost', type: 'button', onclick: () => { if (!timeIn.value) return toast('Pick a time first', true); act(() => api.setShowingTime(o, timeIn.value), 'Time saved')(); } }, 'Save time'),
+    hasTime(o) && el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.setShowingTime(o, ''), 'Time cleared') }, 'Clear'));
   const card = el('article', { className: 'showing' },
     poster(o.poster_url, o.movie_name),
     el('div', { className: 'showing-main' },
       el('div', { className: 'showing-title' }, title),
       el('div', { className: 'meta' },
-        el('span', { className: 'when' }, fmtWhen(o.starts_at, o.tz)),
+        el('span', { className: 'when' }, whenLabel(o)),
         el('span', {}, o.theatre_name),
         o.format && o.format !== 'Standard' && fmtBadge(o.format)),
       el('div', { className: 'goers' }, going.map(goer)),
+      (!past || !hasTime(o)) && timeRow,
       !past && el('div', { className: 'showing-foot' },
         notGoing.map((m) => el('button', {
           className: 'btn sm ghost', type: 'button',
@@ -809,12 +828,38 @@ function showingCard(g, o, now) {
   return card;
 }
 
-/** A movie on a day: its showtimes that day, ready to pick one; or pencil it in / take the pencil mark off. */
+/** A movie on a day: plan it for that day (no time needed), or pick one of its times, or pencil it in. */
 async function movieDaySheet(m, day, g, pick = null) {
   const [shows, theatres, dayInfo] = await Promise.all([api.showtimes({ movie: m.id, date: day }), api.theatres(), api.days()]);
   const movie = (m.id != null && (await api.movie(m.id))) || m;
   const info = dayInfo.get(day);
   const future = day >= isoDay();
+  const showing = shows.length > 0;
+  const t = theatres.find((x) => x.id === shows[0]?.theatreId) ?? theatres.find((x) => x.scrape) ?? theatres[0] ?? { id: null, name: 'AMC', tz: 'America/New_York' };
+  const outing = {
+    movie_id: movie.id ?? null, movie_name: movie.name, movie_slug: movie.slug ?? null, poster_url: movie.poster ?? null,
+    theatre_id: t.id ?? null, theatre_name: t.name, show_date: day, tz: t.tz ?? 'America/New_York',
+  };
+  const existing = g.outings.find((o) => o.show_date === day && !o.starts_at && o.movie_name === movie.name);
+  if (existing) outing.id = existing.id;
+  const already = new Set((existing?.attendees ?? []).filter((a) => a.status !== 'cancelled').map((a) => a.user_id));
+  const who = future ? whoPicker(g, outing, already) : null;
+  const save = el('button', { className: 'btn primary', type: 'button' }, icon('plus'), `Plan it for ${day === isoDay() ? 'today' : fmtDate(day, { weekday: 'long' })}`);
+  save.onclick = async () => {
+    const people = who.picked();
+    if (!people.length) return toast('Pick who is going', true);
+    save.setAttribute('aria-disabled', 'true');
+    try {
+      await api.planShowing(outing, people, who.status());
+      await api.clearPick(day, movie.name).catch(() => {});
+      toast(`${movie.name} planned for ${fmtDate(day)}`);
+      closeSheet();
+      render();
+    } catch (e) {
+      toast(e.message, true);
+      save.removeAttribute('aria-disabled');
+    }
+  };
   openSheet(
     el('div', { className: 'sheet-head' },
       poster(movie.poster, movie.name),
@@ -822,19 +867,23 @@ async function movieDaySheet(m, day, g, pick = null) {
         el('h2', {}, movie.name),
         el('p', { className: 'when big' }, fmtDate(day, { weekday: 'long', month: 'long', day: 'numeric' })),
         el('div', { className: 'meta' }, [movie.rating, fmtRun(movie.runTime)].filter(Boolean).map((x) => el('span', {}, x)),
-          pick && el('span', { className: `pill ${shows.length ? 'planned' : 'warn'}` }, shows.length ? 'Pencilled in · pick a time' : 'Pencilled in'))),
+          el('span', { className: `pill ${showing ? 'reserved' : 'warn'}` }, showing ? `Showing that day (${shows.length})` : info ? 'Not listed that day' : 'Day not read yet'),
+          pick && el('span', { className: 'pill warn' }, 'Pencilled in'))),
       el('button', { className: 'btn sm ghost', type: 'button', ariaLabel: 'Close', onclick: closeSheet }, icon('x'))),
-    shows.length
-      ? byTheatre(shows, theatres, (list, t) => showtimeGroups(list, t, movie, g))
-      : el('section', { className: 'panel notice warnbox' }, icon('warn'), el('p', {},
-        el('b', {}, info ? `Not showing on ${fmtDate(day)}. ` : `No showtimes for ${fmtDate(day)} yet. `),
-        el('span', { className: 'muted' }, info ? 'AMC has nothing for it that day.' : "That day hasn't been read from AMC yet; it fills in within a day or two."))),
+    !showing && el('section', { className: 'panel notice warnbox' }, icon('warn'), el('p', {},
+      el('b', {}, info ? `AMC doesn't list it on ${fmtDate(day)}. ` : `${fmtDate(day)} hasn't been read from AMC yet. `),
+      el('span', { className: 'muted' }, future ? 'You can still plan it if you know it is on (say you already have tickets), or pencil it in for now.' : ''))),
+    future && el('section', {}, el('h3', {}, "Who's going"), who.node),
+    future && el('div', { className: 'row' }, save,
+      !pick && el('button', { className: 'btn ghost', type: 'button', onclick: act(() => api.addPick({ day, movie_id: movie.id ?? null, movie_name: movie.name, movie_slug: movie.slug ?? null, poster_url: movie.poster ?? null }), `${movie.name} pencilled in for ${fmtDate(day)}`) }, 'Just pencil it in'),
+      pick && el('button', { className: 'btn ghost danger', type: 'button', onclick: act(() => api.removePick(pick.id), `${movie.name} taken off ${fmtDate(day)}`) }, icon('x'), 'Remove pencil mark')),
+    future && el('p', { className: 'muted' }, "No time needed: it takes one of that A-List week's admissions either way, and you can add the time later."),
+    showing && el('details', { className: 'times-more' }, el('summary', {}, `Or pick one of its ${shows.length} showtimes`),
+      byTheatre(shows, theatres, (list, th) => showtimeGroups(list, th, movie, g))),
     el('div', { className: 'row' },
-      future && !pick && el('button', { className: 'btn ghost', type: 'button', onclick: act(() => api.addPick({ day, movie_id: movie.id ?? null, movie_name: movie.name, movie_slug: movie.slug ?? null, poster_url: movie.poster ?? null }), `${movie.name} pencilled in for ${fmtDate(day)}`) }, 'Pencil in without a time'),
-      pick && el('button', { className: 'btn ghost danger', type: 'button', onclick: act(() => api.removePick(pick.id), `${movie.name} taken off ${fmtDate(day)}`) }, icon('x'), 'Remove pencil mark'),
-      movie.id != null && el('a', { className: 'btn ghost', href: `/movie/${movie.id}?week=${weekOf(day)}` }, 'All of its times that week'),
-      el('button', { className: 'btn ghost', type: 'button', onclick: () => manualSheet(g, { movie: movie.name, day }) }, icon('plus'), 'Add by hand')),
-    pick && future && el('section', { className: 'moveto' }, el('h3', {}, 'Move it to another day'),
+      movie.id != null && el('a', { className: 'btn ghost sm', href: `/movie/${movie.id}?week=${weekOf(day)}` }, 'Its whole week'),
+      el('button', { className: 'btn ghost sm', type: 'button', onclick: () => manualSheet(g, { movie: movie.name, day }) }, icon('plus'), 'Add by hand')),
+    pick && future && el('section', { className: 'moveto' }, el('h3', {}, 'Move the pencil mark to another day'),
       el('div', { className: 'moveto-days' }, Array.from({ length: 14 }, (_, i) => addDays(isoDay(), i)).filter((d) => d !== day).map((d) =>
         el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.movePick(pick.id, d), `${movie.name} moved to ${fmtDate(d)}`) },
           d === isoDay() ? 'Today' : fmtDate(d, { weekday: 'short', month: 'short', day: 'numeric' }))))));
@@ -969,7 +1018,9 @@ async function moviePage(id) {
         el('span', { className: 'muted' }, info ? `checked ${ago(info.checked)}` : 'not read yet'),
         el('a', { className: 'btn sm ghost', href: plansLink('day', d) }, 'Plan this day')),
       list.length
-        ? byTheatre(list, theatres, (l, t) => showtimeGroups(l, t, m, g))
+        ? [el('div', { className: 'row' }, el('button', { className: 'btn sm primary', type: 'button', onclick: () => movieDaySheet(m, d, g) }, icon('plus'), `Plan it for ${d === today ? 'today' : weekdayOf(d)}`),
+          el('span', { className: 'muted' }, 'or pick a time:')),
+          byTheatre(list, theatres, (l, t) => showtimeGroups(l, t, m, g))]
         : el('p', { className: 'muted' }, info ? 'Not showing this day.' : "This day hasn't been read from AMC yet; it fills in within a day or two. ",
           el('button', { className: 'btn sm ghost', type: 'button', onclick: act(() => api.addPick({ day: d, movie_id: m.id, movie_name: m.name, movie_slug: m.slug ?? null, poster_url: m.poster ?? null }), `${m.name} pencilled in for ${fmtDate(d)}`) }, 'Pencil in'),
           el('button', { className: 'btn sm ghost', type: 'button', onclick: () => manualSheet(g, { movie: m.name, day: d }) }, icon('plus'), 'Add by hand'))));
@@ -1040,7 +1091,7 @@ async function dayPage(date, theatreId = null) {
 
   const showtimes = all.filter((s) => s.date === date);
   const movies = new Map(movieList.map((m) => [m.id, m]));
-  const planned = g.outings.filter((o) => isoDay(o.starts_at) === date);
+  const planned = g.outings.filter((o) => o.show_date === date);
   const byMovie = new Map();
   for (const s of showtimes) (byMovie.get(s.movieId) ?? byMovie.set(s.movieId, []).get(s.movieId)).push(s);
   const blocks = [...byMovie.values()].sort((a, b) => a[0].movieName.localeCompare(b[0].movieName)).map((list) => {
@@ -1056,7 +1107,7 @@ async function dayPage(date, theatreId = null) {
   view(
     heading(t ? t.name : 'Everything on', fmtDate(date, { weekday: 'long', month: 'long', day: 'numeric' })),
     freshBanner(fresh), strip,
-    planned.length > 0 && el('p', { className: 'muted' }, 'Planned that day: ', planned.map((o) => `${o.movie_name} at ${fmtTime(o.starts_at, o.tz)}`).join(', ')),
+    planned.length > 0 && el('p', { className: 'muted' }, 'Planned that day: ', planned.map((o) => `${o.movie_name} ${hasTime(o) ? `at ${fmtTime(o.starts_at, o.tz)}` : '(any time)'}`).join(', ')),
     blocks.length ? blocks : el('p', { className: 'empty' },
       t && !t.scrape ? 'The scraper is switched off for this theatre. Switch it on from the Theatres page.'
         : info ? 'No showtimes this day.' : "This day hasn't been read from AMC yet; it fills in within a day or two."));
@@ -1107,7 +1158,7 @@ function whoPicker(g, outing, alreadyGoing = new Set()) {
       const why = already ? el('span', { className: 'why good' }, 'Already going')
         : !check.ok ? el('span', { className: 'why bad' }, check.problems.join(' · '))
         : check.notes.length ? el('span', { className: 'why warn' }, check.notes.join(' · '))
-        : el('span', { className: 'why muted' }, `${standing(g.of(m.user_id)).byWeek[alistWeek(outing.starts_at, outing.tz)] ?? 0} of ${PER_WEEK} used that week`);
+        : el('span', { className: 'why muted' }, `${standing(g.of(m.user_id)).byWeek[weekOfShowing(outing)] ?? 0} of ${PER_WEEK} used that week`);
       return el('label', { className: box.disabled && !already ? 'blocked' : '' }, box, avatar(m.display_name, true), el('span', {}, m.display_name, m.user_id === me.id ? ' (you)' : ''), why);
     }));
   };
@@ -1125,7 +1176,7 @@ function showtimeSheet(s, t, movie, g) {
   const outing = {
     showtime_id: s.id, movie_id: s.movieId, movie_name: s.movieName, movie_slug: s.movieSlug ?? movie?.slug ?? null,
     poster_url: movie?.poster ?? null, theatre_id: t.id, theatre_name: t.name, auditorium: s.auditorium,
-    format: s.format, starts_at: s.utc, ends_at: new Date(Date.parse(s.utc) + (s.runTime || movie?.runTime || 150) * 60e3).toISOString(),
+    format: s.format, show_date: s.date, starts_at: s.utc, ends_at: new Date(Date.parse(s.utc) + (s.runTime || movie?.runTime || 150) * 60e3).toISOString(),
     tz: t.tz, purchase_url: s.purchaseUrl,
   };
   const existing = g.outings.find((o) => Number(o.showtime_id) === s.id);
@@ -1182,7 +1233,7 @@ async function manualSheet(g, prefill = {}) {
   const theatreName = el('input', { maxLength: 200, placeholder: 'AMC theatre name', hidden: theatres.length > 0 });
   theatreSel.onchange = () => { theatreName.hidden = theatreSel.value !== ''; recheck(); };
   const day = el('input', { type: 'date', value: prefill.day ?? isoDay(), required: true });
-  const time = el('input', { type: 'time', value: '19:00', required: true });
+  const time = el('input', { type: 'time', value: '' });
   const run = el('input', { type: 'number', min: 30, max: 400, value: 150, inputMode: 'numeric' });
   const fmt = el('select', {}, ['Standard', 'Laser at AMC', 'IMAX with Laser at AMC', 'Dolby Cinema at AMC', 'PRIME at AMC', 'RealD 3D', 'Other'].map((f) => new Option(f, f)));
   const match = () => known.find((m) => m.name.toLowerCase() === movie.value.trim().toLowerCase());
@@ -1193,18 +1244,21 @@ async function manualSheet(g, prefill = {}) {
   const outing = () => {
     const t = theatres.find((x) => String(x.id) === theatreSel.value);
     const tz = t?.tz ?? localTz();
-    const start = wallToUtc(day.value, time.value || '19:00', tz);
     const m = match();
-    return {
+    const o = {
       movie_name: m?.name ?? movie.value.trim(), movie_id: m?.id ?? null, movie_slug: m?.slug ?? null, poster_url: m?.poster ?? null,
-      theatre_id: t?.id ?? null, theatre_name: t?.name ?? theatreName.value.trim(),
-      format: fmt.value, tz, starts_at: start.toISOString(),
-      ends_at: new Date(start.getTime() + (Math.min(400, Math.max(30, +run.value || 150))) * 60e3).toISOString(),
+      theatre_id: t?.id ?? null, theatre_name: t?.name ?? theatreName.value.trim(), format: fmt.value, tz, show_date: day.value,
     };
+    if (time.value) { // after midnight counts as the night before
+      const start = wallToUtc(time.value < '05:00' ? addDays(day.value, 1) : day.value, time.value, tz);
+      o.starts_at = start.toISOString();
+      o.ends_at = new Date(start.getTime() + (Math.min(400, Math.max(30, +run.value || 150))) * 60e3).toISOString();
+    }
+    return o;
   };
   const whoWrap = el('div');
   let who;
-  const recheck = () => { if (day.value && time.value) { who = whoPicker(g, outing()); whoWrap.replaceChildren(who.node); } };
+  const recheck = () => { if (day.value) { who = whoPicker(g, outing()); whoWrap.replaceChildren(who.node); } };
   for (const x of [day, time, run]) x.addEventListener('change', recheck);
   recheck();
 
@@ -1230,7 +1284,7 @@ async function manualSheet(g, prefill = {}) {
     el('div', { className: 'form' },
       el('div', { className: 'wide' }, field('Movie', movie), list),
       field('Theatre', theatreSel), !theatres.length ? field('Theatre name', theatreName) : el('div', {}, theatreName),
-      field('Date', day), field('Start time', time), field('Runtime (minutes)', run), field('Format', fmt)),
+      field('Date', day), field('Start time (optional)', time), field('Runtime (minutes)', run), field('Format', fmt)),
     el('section', {}, el('h3', {}, "Who's going"), whoWrap),
     el('div', { className: 'row' }, save));
   requestAnimationFrame(() => (prefill.movie ? time : movie).focus());
@@ -1263,16 +1317,16 @@ async function theatresPage() {
 async function historyPage() {
   const g = await groupData();
   const now = Date.now();
-  const past = g.outings.filter((o) => new Date(o.starts_at) <= now).reverse();
-  const watched = (id) => g.of(id).filter((a) => a.status !== 'cancelled' && new Date(a.starts_at) <= now);
+  const past = g.outings.filter(isPast).sort(byShowing).reverse();
+  const watched = (id) => g.of(id).filter((a) => a.status !== 'cancelled' && isPast(a));
   const year = String(new Date().getFullYear());
   view(heading('Everything so far', 'History'),
     el('div', { className: 'tiles' }, g.members.flatMap((m) => [
       stat(`${m.display_name} · all time`, watched(m.user_id).length),
-      stat(`${m.display_name} · ${year}`, watched(m.user_id).filter((a) => a.starts_at.startsWith(year)).length),
+      stat(`${m.display_name} · ${year}`, watched(m.user_id).filter((a) => a.show_date.startsWith(year)).length),
     ])),
     table([
-      { label: 'When', val: (o) => o.starts_at, cell: (o) => fmtWhen(o.starts_at, o.tz) },
+      { label: 'When', val: (o) => showingKey(o), cell: (o) => whenLabel(o) },
       { label: 'Movie', val: (o) => o.movie_name, cell: (o) => (o.movie_id ? link(`/movie/${o.movie_id}`, o.movie_name) : o.movie_name), num: false },
       { label: 'Theatre', val: (o) => o.theatre_name, num: false },
       { label: 'Format', val: (o) => o.format ?? '', cell: (o) => (o.format ? fmtBadge(o.format) : '–'), num: false },

@@ -2,7 +2,7 @@
 // with amc.ingest(). The scraper only holds AMC_INGEST_TOKEN, a secret good for nothing but this function, so the
 // Supabase service-role key never leaves Supabase. verify_jwt is off: the token is the check.
 //
-//   POST { action: 'targets' }          -> { theatres: [{ id, slug, market, tz }] }   theatres to scrape
+//   POST { action: 'targets' }          -> { theatres: [{ id, slug, market, tz, want_days }] }   what to scrape
 //   POST { action: 'ingest', run: {...} } -> { showtimes, pruned }                     see amc.ingest() for the shape
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
@@ -34,7 +34,11 @@ Deno.serve(async (req) => {
     const { data, error } = await db.schema('amc').from('theatres')
       .select('id, slug, market, tz').eq('scrape', true).not('slug', 'is', null).not('market', 'is', null);
     if (error) return json(500, { error: error.message });
-    return json(200, { theatres: data });
+    // days with plans or pencil marks that haven't been read lately: the scraper reads these first
+    const wants = await db.schema('amc').rpc('scrape_wants');
+    if (wants.error) return json(500, { error: wants.error.message });
+    const theatres = data.map((t) => ({ ...t, want_days: (wants.data ?? []).filter((w) => w.theatre_id === t.id).map((w) => w.day) }));
+    return json(200, { theatres });
   }
 
   if (body.action === 'ingest') {

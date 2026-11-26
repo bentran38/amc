@@ -31,6 +31,11 @@ Static site (no framework), same Supabase project and shared login as [durpeesqu
 - **History**, **Rules**: what everyone has watched, and the rules below.
 - **Add by hand**: plan any showing on any day (suggests movies the scraper has seen and fills in their runtime).
 
+- **Planning by day**: what matters is which days a movie is on, not its exact showtimes. A showing has a date and,
+  only if someone knows it, a time ("Any time" until then; set it from the showing's details). Planning a movie for a
+  day needs no time, also on a day that hasn't been read yet (when you already have tickets). Showtimes are still
+  there under "or pick one of its times" if you want one.
+
 ## A-List rules
 
 From AMC's [A-List terms](https://www.amctheatres.com/amcstubs/alist/terms-and-conditions), checked November 2026:
@@ -60,7 +65,9 @@ the admission. A week is measured in the theatre's time zone.
   refusing the next (seat pages always). So each run reads one page per theatre and stops; nothing tries to get
   around the block. Which day it reads rotates: today's page once a day, otherwise the most overdue of the next 13
   days (nearer days first), tracked in `scraper/state.json`. With four runs a day, today stays current and the rest of
-  this A-List week and all of next refresh every day or two. A blocked run is logged and the site shows it.
+  this A-List week and all of next refresh every day or two. Days the group has a plan or a pencil mark on are read
+  first (`amc.scrape_wants()`, passed to the scraper by the `targets` action), and every read day is noted in
+  `amc.days_read`, even one with nothing on. A blocked run is logged and the site shows it.
 - **Ingest**: `scraper/scrape.js` sends the result to the `amc-ingest` Edge Function with the `x-ingest-token` header
   (`AMC_INGEST_TOKEN`, a secret good for nothing else), which calls `amc.ingest()` as the service role. That upserts
   `movies` and `showtimes`, deletes showtimes AMC dropped from a day it read, clears ones over 2 days old, and logs the run

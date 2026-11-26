@@ -56,21 +56,38 @@ export function weekLabel(friday) {
 }
 
 const active = (a) => a.status !== 'cancelled';
-const overlaps = (a, b) => new Date(a.starts_at) < new Date(b.ends_at) && new Date(b.starts_at) < new Date(a.ends_at);
+// only showings with a time can overlap; a movie planned for a day without one fits around anything
+const overlaps = (a, b) => !!(a.starts_at && b.starts_at) &&
+  new Date(a.starts_at) < new Date(b.ends_at) && new Date(b.starts_at) < new Date(a.ends_at);
+
+/** The A-List week (its Friday) for a calendar day 'YYYY-MM-DD' (same as amc.day_week in SQL). */
+export function weekOfDay(day) {
+  const t = Date.parse(`${day}T00:00:00Z`);
+  return new Date(t - ((new Date(t).getUTCDay() - 5 + 7) % 7) * DAY).toISOString().slice(0, 10);
+}
+/** The A-List week a showing counts in: by its date (every showing has one), else by its time. */
+export const weekOfShowing = (a, tz = localTz()) => (a.show_date ? weekOfDay(a.show_date) : alistWeek(a.starts_at, a.tz ?? tz));
+/** Still to come: its time hasn't passed, or (without a time) its day isn't over. */
+export function isUpcoming(a, now = Date.now()) {
+  if (a.starts_at) return new Date(a.starts_at) > now;
+  const d = new Date(now);
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return a.show_date >= today;
+}
 
 /**
  * Where one person stands. `admissions` are that person's rows (an outing plus status), as in the
- * amc.admissions view: { outing_id, status, starts_at, ends_at, tz }.
+ * amc.admissions view: { outing_id, status, show_date, starts_at?, ends_at?, tz }.
  */
 export function standing(admissions, now = Date.now(), tz = localTz()) {
   const live = admissions.filter(active);
   const thisWeek = alistWeek(now, tz);
   const byWeek = {};
   for (const a of live) {
-    const w = alistWeek(a.starts_at, a.tz ?? tz);
+    const w = weekOfShowing(a, tz);
     byWeek[w] = (byWeek[w] ?? 0) + 1;
   }
-  const upcoming = live.filter((a) => new Date(a.starts_at) > now);
+  const upcoming = live.filter((a) => isUpcoming(a, now));
   return {
     thisWeek,
     byWeek,
@@ -82,20 +99,20 @@ export function standing(admissions, now = Date.now(), tz = localTz()) {
 }
 
 /**
- * Can this person go to `outing` ({ id?, starts_at, ends_at, tz })? `status` is what they'd hold
+ * Can this person go to `outing` ({ id?, show_date?, starts_at?, ends_at?, tz })? `status` is what they'd hold
  * ('planned' or 'reserved'). Returns { ok, problems: string[], notes: string[] }: problems are rule
  * breaks the database will refuse; notes are things worth knowing that don't block a plan.
  */
 export function canAttend(admissions, outing, status = 'planned', now = Date.now()) {
   const others = admissions.filter((a) => active(a) && a.outing_id !== outing.id);
   const problems = [], notes = [];
-  const wk = alistWeek(outing.starts_at, outing.tz);
-  const sameWeek = others.filter((a) => alistWeek(a.starts_at, a.tz) === wk).length;
+  const wk = weekOfShowing(outing);
+  const sameWeek = others.filter((a) => weekOfShowing(a) === wk).length;
   if (sameWeek >= PER_WEEK) problems.push(`Already has ${PER_WEEK} movies that A-List week`);
   const clash = others.find((a) => overlaps(a, outing));
   if (clash) problems.push(`Overlaps ${clash.movie_name ?? 'another showing'}`);
-  const future = new Date(outing.starts_at) > now;
-  const reserved = others.filter((a) => a.status === 'reserved' && new Date(a.starts_at) > now).length;
+  const future = isUpcoming(outing, now);
+  const reserved = others.filter((a) => a.status === 'reserved' && isUpcoming(a, now)).length;
   if (future && reserved >= PENDING) {
     if (status === 'reserved') problems.push(`Already holds ${PENDING} upcoming reservations`);
     else notes.push(`Holds ${PENDING} reservations now: reserve this once one has been used`);
